@@ -445,6 +445,57 @@ a:hover { color: var(--accent); }
   color: var(--ink-faint);
 }
 
+/* tall variant for the full-lifecycle demo — fixed 10-line viewport that
+   scrolls like a real terminal as new lines stream in. Old lines push up
+   and out of view. Users with JS disabled can still scroll manually. */
+.shell-demo--tall .shell-demo__body {
+  height: 17rem;
+  min-height: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-y: auto;
+  scroll-behavior: auto;        /* instant snap — matches terminal feel */
+  scrollbar-width: none;        /* Firefox */
+}
+.shell-demo--tall .shell-demo__body::-webkit-scrollbar {
+  display: none;                /* WebKit */
+}
+/* Soft fade at the top so the scrolled-out-of-view content implies depth
+   without adding chrome */
+.shell-demo--tall {
+  position: relative;
+}
+.shell-demo--tall::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 2.15rem;                 /* sits just under the chrome bar */
+  height: 1.2rem;
+  background: linear-gradient(to bottom, var(--paper-2), transparent);
+  pointer-events: none;
+  z-index: 1;
+}
+@media (max-width: 720px) {
+  .shell-demo--tall .shell-demo__body {
+    height: 18rem;
+    font-size: 11px;
+  }
+}
+
+/* proven-stacks tagline — small caption below the hero metrics */
+.hero__proof {
+  margin-top: 1.25rem;
+  font-size: 12px;
+  color: var(--ink-faint);
+  letter-spacing: 0.01em;
+  max-width: none;
+}
+.hero__proof .kw {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .hero__metrics {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1015,7 +1066,6 @@ footer.foot {
       <span class="titlebar__path">~/<b>apexstack</b> <span class="dim">— main · v0.1</span></span>
     </div>
     <nav class="titlebar__right" aria-label="Primary">
-      <a href="#stack">stack</a>
       <a href="#tree">tree</a>
       <a href="#layers">layers</a>
       <a href="#examples">examples</a>
@@ -1054,28 +1104,72 @@ footer.foot {
       <a href="#install" class="cta cta--ghost">or install it now ↓</a>
     </div>
 
-    <div class="shell-demo rise rise-4" id="shell-demo" aria-label="Demo of the /idea slash command running in Claude Code">
+    <div class="shell-demo shell-demo--tall rise rise-4" id="shell-lifecycle" aria-label="Demo of a full ticket lifecycle in apexstack, from inbox pickup to QA sign-off">
       <div class="shell-demo__chrome" aria-hidden="true">
         <span class="shell-demo__dots">
           <span class="shell-demo__dot"></span>
           <span class="shell-demo__dot"></span>
           <span class="shell-demo__dot is-warn"></span>
         </span>
-        <span class="shell-demo__title">claude code — apexstack — /idea</span>
-        <button type="button" class="shell-demo__replay" id="shell-demo-replay" aria-label="Replay the demo">replay ↻</button>
+        <span class="shell-demo__title">claude code — apexstack — one ticket, start to finish</span>
+        <button type="button" class="shell-demo__replay" id="shell-lifecycle-replay" aria-label="Replay the lifecycle demo">replay ↻</button>
       </div>
-      <div class="shell-demo__body" id="shell-demo-body">
-        <div class="line cmd"><span class="prompt">$ </span>/idea Usage-based pricing for creators</div>
-        <div class="line sys">Category? (1) New Product (2) Feature (3) Internal Tool (4) Process</div>
-        <div class="line you"><span class="prompt">&gt; </span>2</div>
-        <div class="line sys">Description? (one line)</div>
-        <div class="line you"><span class="prompt">&gt; </span>Let creators tier paid access by usage instead of seat count</div>
-        <div class="line sys">Create GitHub Issue in your-org/example-app? (y/n)</div>
+      <div class="shell-demo__body" id="shell-lifecycle-body">
+        <div class="line sys">Inbox:</div>
+        <div class="line muted">&nbsp;&nbsp;#58 · Add CSV export to reports · P1 · your-org/billing-api</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Picking up #58...</div>
+        <div class="line ok">&nbsp;&nbsp;✓ branch feature/GH-58-csv-export</div>
+        <div class="line muted">&nbsp;&nbsp;Tech Lead role: planning</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Plan for #58:</div>
+        <div class="line muted">&nbsp;&nbsp;1. CsvExporter service (domain layer)</div>
+        <div class="line muted">&nbsp;&nbsp;2. GET /reports/:id/export endpoint</div>
+        <div class="line muted">&nbsp;&nbsp;3. 12 unit + 1 integration test</div>
+        <div class="line sys">Approve plan? (y/n)</div>
         <div class="line you"><span class="prompt">&gt; </span>y</div>
-        <div class="line ok">✓ Captured: IDEA-025 — Usage-based pricing for creators</div>
-        <div class="line muted">&nbsp;&nbsp;Backlog:&nbsp;&nbsp;projects/ideas-backlog.md</div>
-        <div class="line muted">&nbsp;&nbsp;Tracking: your-org/example-app#31</div>
-        <div class="line muted">&nbsp;&nbsp;Next:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;triage, then /write-spec</div>
+        <div class="line">&nbsp;</div>
+        <div class="line muted">Backend Engineer role: implementing</div>
+        <div class="line ok">&nbsp;&nbsp;✓ src/domain/csv-exporter.ts</div>
+        <div class="line ok">&nbsp;&nbsp;✓ src/handlers/export-report.handler.ts</div>
+        <div class="line ok">&nbsp;&nbsp;✓ tests pass locally</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Detected decision: papaparse vs csv-stringify</div>
+        <div class="line muted">&nbsp;&nbsp;AgDR-0014 · chose csv-stringify (zero deps)</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Local checks:</div>
+        <div class="line ok">&nbsp;&nbsp;✓ lint&nbsp;&nbsp;✓ types&nbsp;&nbsp;✓ 147 tests&nbsp;&nbsp;✓ 1.2mb build</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Ready to push PR #84?</div>
+        <div class="line you"><span class="prompt">&gt; </span>y</div>
+        <div class="line">&nbsp;</div>
+        <div class="line ok">Pushed · Opened PR #84 · feat(#58): add CSV export</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Rex reviewing a3f9c21...</div>
+        <div class="line muted">&nbsp;&nbsp;Architecture · PASS (domain clean)</div>
+        <div class="line muted">&nbsp;&nbsp;Tests&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· 94% coverage</div>
+        <div class="line muted">&nbsp;&nbsp;AgDR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· AgDR-0014 linked</div>
+        <div class="line muted">&nbsp;&nbsp;Glossary&nbsp;&nbsp;&nbsp;&nbsp;· 5 terms</div>
+        <div class="line ok">&nbsp;&nbsp;Verdict&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· APPROVE — deferring to CEO</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Waiting for CEO 👍</div>
+        <div class="line">&nbsp;</div>
+        <div class="line ok">CEO 👍</div>
+        <div class="line ok">&nbsp;&nbsp;✓ squashed as 8b2f4c1</div>
+        <div class="line ok">&nbsp;&nbsp;✓ branch deleted</div>
+        <div class="line ok">&nbsp;&nbsp;✓ #58 → QA state (not Done yet)</div>
+        <div class="line">&nbsp;</div>
+        <div class="line sys">Pipeline on main:</div>
+        <div class="line ok">&nbsp;&nbsp;✓ lint&nbsp;&nbsp;✓ test&nbsp;&nbsp;✓ build&nbsp;&nbsp;✓ deploy-staging</div>
+        <div class="line">&nbsp;</div>
+        <div class="line muted">QA Engineer role: verifying on staging</div>
+        <div class="line ok">&nbsp;&nbsp;✓ AC1 · export button renders</div>
+        <div class="line ok">&nbsp;&nbsp;✓ AC2 · CSV columns + escaping correct</div>
+        <div class="line ok">&nbsp;&nbsp;✓ AC3 · 10k rows in &lt;5s</div>
+        <div class="line ok">&nbsp;&nbsp;✓ regression clean</div>
+        <div class="line ok">QA sign-off: #58 ready for Done</div>
+        <div class="line">&nbsp;</div>
+        <div class="line ok">Done · #58 · 14m 32s dev + 3m 10s QA</div>
       </div>
     </div>
 
@@ -1107,6 +1201,10 @@ footer.foot {
         <span>Operating modes (single &amp; multi-project)</span>
       </div>
     </div>
+
+    <p class="hero__proof rise rise-5" aria-label="Stacks proven in production">
+      Proven shipping · <span class="kw">TypeScript</span> + AWS Lambda backends · <span class="kw">Next.js</span> web apps · <span class="kw">Chrome</span> extensions · native <span class="kw">Swift</span> macOS apps
+    </p>
 
   </div>
 </section>
@@ -1697,33 +1795,88 @@ echo '@~/.apexstack/CLAUDE.md' &gt;&gt; CLAUDE.md
   }
 })();
 
-// ---- /idea shell animation ----
+// ---- full lifecycle shell animation (hero) ----
+// The demo lives in the hero so it's visible on load — IntersectionObserver
+// still used so the play trigger stays consistent, and the hasPlayed gate
+// ensures it only auto-plays once. Falls back to delayed auto-play if IO is
+// missing. Respects prefers-reduced-motion — static content stays, no
+// animation. The small 17rem shell-demo--tall viewport scrolls to the
+// bottom on each new line so old lines push up and out, like a terminal.
 (function () {
-  var body = document.getElementById('shell-demo-body');
-  var replay = document.getElementById('shell-demo-replay');
-  if (!body) return;
+  var body = document.getElementById('shell-lifecycle-body');
+  var replay = document.getElementById('shell-lifecycle-replay');
+  var wrapper = document.getElementById('shell-lifecycle');
+  if (!body || !wrapper) return;
 
-  // Respect prefers-reduced-motion: keep the pre-rendered static demo, skip the typewriter
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     return;
   }
 
   // Script: [type, text, delayAfterMs, typeSpeedMs (0 = instant)]
+  // Types: sys (narrated agent action / header), you (human input, typed),
+  //        ok (success line), muted (dim detail), blank (empty spacer).
+  // Autonomous by default — the ONLY human touchpoints are the two `you`
+  // responses (plan approval + push approval) and the CEO 👍 wait/marker.
   var script = [
-    ['cmd',   '/idea Usage-based pricing for creators',                             900, 40],
-    ['sys',   'Category? (1) New Product (2) Feature (3) Internal Tool (4) Process', 420, 0],
-    ['you',   '2',                                                                   650, 140],
-    ['sys',   'Description? (one line)',                                             420, 0],
-    ['you',   'Let creators tier paid access by usage instead of seat count',        900, 32],
-    ['sys',   'Create GitHub Issue in your-org/example-app? (y/n)',                  420, 0],
-    ['you',   'y',                                                                   700, 180],
-    ['ok',    '\u2713 Captured: IDEA-025 — Usage-based pricing for creators',        360, 0],
-    ['muted', '  Backlog:  projects/ideas-backlog.md',                               360, 0],
-    ['muted', '  Tracking: your-org/example-app#31',                                 360, 0],
-    ['muted', '  Next:     triage, then /write-spec',                                  0, 0]
+    ['sys',   'Inbox:',                                                                    200, 0],
+    ['muted', '  #58 · Add CSV export to reports · P1 · your-org/billing-api',             800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Picking up #58...',                                                         400, 0],
+    ['ok',    '  ✓ branch feature/GH-58-csv-export',                                       300, 0],
+    ['muted', '  Tech Lead role: planning',                                                800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Plan for #58:',                                                             350, 0],
+    ['muted', '  1. CsvExporter service (domain layer)',                                   250, 0],
+    ['muted', '  2. GET /reports/:id/export endpoint',                                     250, 0],
+    ['muted', '  3. 12 unit + 1 integration test',                                         450, 0],
+    ['sys',   'Approve plan? (y/n)',                                                       500, 0],
+    ['you',   'y',                                                                         700, 200],
+    ['blank', '',                                                                          200, 0],
+    ['muted', 'Backend Engineer role: implementing',                                       500, 0],
+    ['ok',    '  ✓ src/domain/csv-exporter.ts',                                            300, 0],
+    ['ok',    '  ✓ src/handlers/export-report.handler.ts',                                 300, 0],
+    ['ok',    '  ✓ tests pass locally',                                                    700, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Detected decision: papaparse vs csv-stringify',                             400, 0],
+    ['muted', '  AgDR-0014 · chose csv-stringify (zero deps)',                             800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Local checks:',                                                             350, 0],
+    ['ok',    '  ✓ lint  ✓ types  ✓ 147 tests  ✓ 1.2mb build',                             800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Ready to push PR #84?',                                                     500, 0],
+    ['you',   'y',                                                                         700, 200],
+    ['blank', '',                                                                          200, 0],
+    ['ok',    'Pushed · Opened PR #84 · feat(#58): add CSV export',                        800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Rex reviewing a3f9c21...',                                                  500, 0],
+    ['muted', '  Architecture · PASS (domain clean)',                                      250, 0],
+    ['muted', '  Tests        · 94% coverage',                                             250, 0],
+    ['muted', '  AgDR         · AgDR-0014 linked',                                         250, 0],
+    ['muted', '  Glossary     · 5 terms',                                                  300, 0],
+    ['ok',    '  Verdict      · APPROVE — deferring to CEO',                               800, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Waiting for CEO 👍',                                                       1500, 0],
+    ['blank', '',                                                                          200, 0],
+    ['ok',    'CEO 👍',                                                                    500, 0],
+    ['ok',    '  ✓ squashed as 8b2f4c1',                                                   250, 0],
+    ['ok',    '  ✓ branch deleted',                                                        250, 0],
+    ['ok',    '  ✓ #58 → QA state (not Done yet)',                                         700, 0],
+    ['blank', '',                                                                          200, 0],
+    ['sys',   'Pipeline on main:',                                                         350, 0],
+    ['ok',    '  ✓ lint  ✓ test  ✓ build  ✓ deploy-staging',                               900, 0],
+    ['blank', '',                                                                          200, 0],
+    ['muted', 'QA Engineer role: verifying on staging',                                    500, 0],
+    ['ok',    '  ✓ AC1 · export button renders',                                           250, 0],
+    ['ok',    '  ✓ AC2 · CSV columns + escaping correct',                                  250, 0],
+    ['ok',    '  ✓ AC3 · 10k rows in <5s',                                                 250, 0],
+    ['ok',    '  ✓ regression clean',                                                      350, 0],
+    ['ok',    'QA sign-off: #58 ready for Done',                                           900, 0],
+    ['blank', '',                                                                          200, 0],
+    ['ok',    'Done · #58 · 14m 32s dev + 3m 10s QA',                                        0, 0]
   ];
 
   var timeouts = [];
+  var hasPlayed = false;
 
   function clearTimeouts() {
     timeouts.forEach(function (t) { clearTimeout(t); });
@@ -1749,9 +1902,16 @@ echo '@~/.apexstack/CLAUDE.md' &gt;&gt; CLAUDE.md
     step();
   }
 
+  function scrollToBottom() {
+    // Snap to the bottom after a new line lands. Using scrollHeight
+    // directly keeps it cheap and matches real-terminal behaviour.
+    body.scrollTop = body.scrollHeight;
+  }
+
   function play() {
     clearTimeouts();
     body.innerHTML = '';
+    body.scrollTop = 0;
     var i = 0;
 
     function next() {
@@ -1763,22 +1923,36 @@ echo '@~/.apexstack/CLAUDE.md' &gt;&gt; CLAUDE.md
       var speed = entry[3];
 
       var line = document.createElement('div');
-      line.className = 'line ' + type;
+      line.className = type === 'blank' ? 'line' : 'line ' + type;
       body.appendChild(line);
+      scrollToBottom();
 
-      if (type === 'cmd' || type === 'you') {
+      if (type === 'blank') {
+        line.innerHTML = '&nbsp;';
+        scrollToBottom();
+        i++;
+        timeouts.push(setTimeout(next, delayAfter));
+        return;
+      }
+
+      if (type === 'you') {
+        // The ONLY type with a prompt — human input marker
         var prompt = document.createElement('span');
         prompt.className = 'prompt';
-        prompt.textContent = type === 'cmd' ? '$ ' : '> ';
+        prompt.textContent = '> ';
         line.appendChild(prompt);
         var inner = document.createElement('span');
         line.appendChild(inner);
         typeInto(inner, text, speed, function () {
+          scrollToBottom();
           i++;
           timeouts.push(setTimeout(next, delayAfter));
         });
       } else {
+        // sys / ok / muted / (any other) — autonomous agent output,
+        // rendered as plain text with the type class driving colour
         line.textContent = text;
+        scrollToBottom();
         i++;
         timeouts.push(setTimeout(next, delayAfter));
       }
@@ -1787,16 +1961,32 @@ echo '@~/.apexstack/CLAUDE.md' &gt;&gt; CLAUDE.md
     next();
   }
 
-  // Reveal the replay button (hidden by default so no-JS users don't see a dead button)
   if (replay) {
     replay.style.display = 'inline-block';
     replay.addEventListener('click', function () {
+      hasPlayed = true;
       play();
     });
   }
 
-  // Start after a short beat so the rise-4 fade-in has time to breathe
-  timeouts.push(setTimeout(play, 900));
+  // Intersection observer — auto-play ONCE when the demo scrolls into view
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting && !hasPlayed) {
+          hasPlayed = true;
+          timeouts.push(setTimeout(play, 500));
+          io.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.3 });
+    io.observe(wrapper);
+  } else {
+    // Fallback: auto-play on page load after a delay
+    timeouts.push(setTimeout(function () {
+      if (!hasPlayed) { hasPlayed = true; play(); }
+    }, 3000));
+  }
 })();
 </script>
 
