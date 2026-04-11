@@ -122,15 +122,18 @@ Four more hooks added by the rule-audit ticket ([#13](https://github.com/me2resh
 **Default architecture paths** (regex):
 
 ```
-infrastructure/           # terraform, pulumi, cdk, cfn layouts
-\.tf$ / \.tfvars$         # terraform files
-^terraform/
-^docker-compose.*\.ya?ml$ # container orchestration
-^Dockerfile               # dockerfiles
-^\.github/workflows/      # CI/CD pipeline changes
+\.tf$                         # any terraform file at any depth
+\.tfvars$                     # any terraform vars at any depth
+(^|/)docker-compose.*\.ya?ml$ # compose files at root or in monorepo subdirs
+(^|/)Dockerfile               # Dockerfiles at root or in monorepo subdirs
+^\.github/workflows/          # GitHub Actions workflow files
 ```
 
+All path patterns use the `(^|/)` anchor so they catch **monorepo layouts** (`backend/Dockerfile`, `web/docker-compose.yml`, `services/api/Dockerfile.prod`) as well as root-level files. This was refined post-#13 in #18 — the original `^Dockerfile` only caught root-level files and silently skipped monorepo Dockerfiles.
+
 **Customize:** set `.architecture_paths` in `.claude/project-config.json` to a JSON array of regex patterns. The default list is deliberately narrow — see AgDR-0001 for why dependency manifests (`package.json`, `go.mod`) and API schemas are explicitly excluded.
+
+**Not in the default list (known gap):** CDK / Pulumi / generic-IaC projects that use plain `.ts` / `.py` / `.go` files inside an `infrastructure/` directory. The original draft had a generic `(^|/)infrastructure/` pattern for this, but testing showed it false-positives on `docs/infrastructure/notes.md` and `src/types/infrastructure/foo.ts` — the word "infrastructure" is ambiguous as a directory name. Projects that want CDK-style coverage should add an explicit override like `(^|/)infrastructure/.*\.(ts|py|go)$` via `.architecture_paths`.
 
 **Enforces:** `.claude/rules/agdr-decisions.md § Enforcement` — specifically the line "Pre-commit hook warns if architecture files changed without an AgDR reference", which was prose-only until this hook shipped.
 

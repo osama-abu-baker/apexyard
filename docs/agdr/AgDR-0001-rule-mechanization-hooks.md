@@ -163,3 +163,25 @@ This is the same list used in the PR-title regex in `git-conventions.md` (plus `
 - Hooks added (in this PR): `require-agdr-for-arch-changes.sh`, `require-design-review-for-ui.sh`, `block-merge-on-red-ci.sh`, `validate-commit-format.sh`
 - Companion PRs merged earlier in the same session: `646302e` (explicit merge approval, #11), `d0a2128` (ticket vocabulary + verify-issue-exists, #14)
 - Hooks README section documenting the four new hooks (this PR)
+
+## Post-ship amendments
+
+This AgDR is historical — the threshold decisions below reflect the state at the time of writing (2026-04-11, commit `772506e` on PR #17). Post-ship refinements are tracked here as a changelog so the original decision block stays intact.
+
+### 2026-04-11 — architecture path anchors refined for monorepos ([#18](https://github.com/me2resh/apexstack/issues/18) / PR to follow)
+
+Rex's review of PR #17 flagged that the original `^Dockerfile` / `^docker-compose.*` anchors silently missed monorepo layouts (`backend/Dockerfile`, `web/docker-compose.yml`). The original unanchored `infrastructure/` matched `docs/infrastructure/notes.md` as a false positive. Refined defaults:
+
+**Removed from defaults** (ambiguous directory name, false-positive-prone):
+
+- `(^|/)infrastructure/` — "infrastructure" is used for IaC in some projects and library code in others. Dropped in favor of relying on file-extension patterns. Projects that use CDK/Pulumi with plain `.ts`/`.py` files in `infrastructure/` should override via `.architecture_paths` (e.g. `(^|/)infrastructure/.*\.(ts|py|go)$`).
+- `(^|/)terraform/` — same ambiguity, and Terraform files are already caught unambiguously via `\.tf$` and `\.tfvars$` at any depth.
+
+**Anchoring updated to `(^|/)` prefix** so monorepo subdirectory paths match:
+
+- `^Dockerfile` → `(^|/)Dockerfile`
+- `^docker-compose.*\.ya?ml$` → `(^|/)docker-compose.*\.ya?ml$`
+
+**Verified with 21 path fixtures** in PR #18's smoke tests (13 should-match cases including monorepo layouts, 8 should-NOT-match cases including the previously-false-positive `docs/infrastructure/` and `docs/terraform-primer.md` paths).
+
+**Also in #18**: dead-code cleanup (`FAILED_COUNT` / `PENDING_COUNT` in `block-merge-on-red-ci.sh` lines 69–70, defined but never referenced).

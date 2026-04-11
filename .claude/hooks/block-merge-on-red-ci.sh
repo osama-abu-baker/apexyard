@@ -65,10 +65,8 @@ if [ "$CHECKS_RC" = "0" ]; then
   exit 0
 fi
 
-# Red CI (exit 1) or unknown non-zero. Build a readable report.
-FAILED_COUNT=$(echo "$CHECKS_OUTPUT" | grep -c -E '^(fail|FAIL|✗|X)' 2>/dev/null || echo 0)
-PENDING_COUNT=$(echo "$CHECKS_OUTPUT" | grep -c -E '^(pending|PENDING|\*|-)' 2>/dev/null || echo 0)
-
+# Red CI (exit 1) or unknown non-zero. Emit the raw check output in the
+# error message so the user can see exactly which checks are red.
 cat >&2 <<MSG
 BLOCKED: PR #${PR_NUMBER} has red CI. Cannot merge.
 

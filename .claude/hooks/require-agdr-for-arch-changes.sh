@@ -45,12 +45,30 @@ if [ -z "$STAGED" ]; then
 fi
 
 # Default architecture path patterns. Projects can override via project-config.
-ARCH_GLOBS='infrastructure/
-\.tf$
+#
+# All patterns are designed to match both root-level files AND monorepo
+# subdirectory files. Rex flagged the original anchors in the review of #13 /
+# PR #17: ^Dockerfile / ^docker-compose missed backend/Dockerfile etc., which
+# is the common layout for real monorepos.
+#
+# (^|/) = "start of string OR preceded by a slash". This matches:
+#   Dockerfile                   ← root
+#   backend/Dockerfile           ← monorepo subdir
+#   services/api/Dockerfile.prod ← nested subdir
+# but NOT:
+#   notes-about-Dockerfile.md    ← no slash or start boundary
+#
+# Why no `infrastructure/` or `terraform/` directory pattern: testing showed
+# those match `docs/infrastructure/notes.md` and `src/types/infrastructure/foo.ts`
+# as false positives (the word "infrastructure" is ambiguous as a directory
+# name — IaC vs library code). Terraform files are caught via `\.tf$` at any
+# depth, which is unambiguous. CDK / Pulumi projects that use plain .ts / .py
+# files inside an `infrastructure/` directory need to override via
+# .architecture_paths in project-config.json.
+ARCH_GLOBS='\.tf$
 \.tfvars$
-^terraform/
-^docker-compose.*\.ya?ml$
-^Dockerfile
+(^|/)docker-compose.*\.ya?ml$
+(^|/)Dockerfile
 ^\.github/workflows/'
 
 # Allow project-config to override
