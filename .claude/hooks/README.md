@@ -109,6 +109,115 @@ Each referenced number is verified against the tracker repo via `gh issue view`.
 
 The primary fix for the vocabulary-collision failure mode is the **rule** in `.claude/rules/ticket-vocabulary.md`. Read it. The hooks catch downstream symptoms at the moment of durable commitment (PR title, commit message). They cannot see prose output — so the vocabulary rule has to come first, and these hooks are the grep-able artifact trail when the rule fails.
 
+## The Rule-Mechanization Hooks (GH-13)
+
+Four more hooks added by the rule-audit ticket ([#13](https://github.com/me2resh/apexstack/issues/13)) and recorded in [`docs/agdr/AgDR-0001-rule-mechanization-hooks.md`](../../docs/agdr/AgDR-0001-rule-mechanization-hooks.md). Each closes a specific "prose rule the model drops under pressure" gap that the audit surfaced.
+
+### 7. AgDR-for-arch-changes — `require-agdr-for-arch-changes.sh`
+
+**Event:** `PreToolUse` on `Bash(git commit *)`.
+
+**What it does:** parses the commit message and the staged diff. If any staged file matches the architecture path list, requires **either** (a) a new AgDR file staged alongside (`docs/agdr/AgDR-NNNN-*.md`), **or** (b) an AgDR reference in the commit message (`AgDR-NNNN` or `docs/agdr/AgDR-`). Blocks the commit otherwise.
+
+**Default architecture paths** (regex):
+
+```
+infrastructure/           # terraform, pulumi, cdk, cfn layouts
+\.tf$ / \.tfvars$         # terraform files
+^terraform/
+^docker-compose.*\.ya?ml$ # container orchestration
+^Dockerfile               # dockerfiles
+^\.github/workflows/      # CI/CD pipeline changes
+```
+
+**Customize:** set `.architecture_paths` in `.claude/project-config.json` to a JSON array of regex patterns. The default list is deliberately narrow — see AgDR-0001 for why dependency manifests (`package.json`, `go.mod`) and API schemas are explicitly excluded.
+
+**Enforces:** `.claude/rules/agdr-decisions.md § Enforcement` — specifically the line "Pre-commit hook warns if architecture files changed without an AgDR reference", which was prose-only until this hook shipped.
+
+### 8. Design-review-for-UI merge gate — `require-design-review-for-ui.sh`
+
+**Event:** `PreToolUse` on `Bash(gh pr merge *)`.
+
+**What it does:** if the PR's diff touches any UI file, requires a design-approval marker at `.claude/session/reviews/<pr>-design.approved` with a SHA matching HEAD. Non-UI PRs bypass silently.
+
+**Default UI paths** (regex):
+
+```
+\.tsx$                    # React (TSX only, NOT plain .ts)
+\.jsx$                    # React (JSX only, NOT plain .js)
+\.vue$
+\.svelte$
+\.css$ / \.scss$ / \.sass$ / \.less$
+design-tokens
+```
+
+**Critical note:** `.tsx`/`.jsx` are matched **exactly**, not as `.tsx?` / `.jsx?`. The original draft had the regex-optional form, which also matched plain `.ts` and `.js` files — caught in smoke testing and fixed before merge. Server-side TypeScript/JavaScript should never trigger a design gate.
+
+**Customize:** `.ui_paths` in `.claude/project-config.json`.
+
+**Marker writing:** there is no `/approve-design` skill yet; the design reviewer (or UI Designer role) writes the marker manually:
+
+```bash
+mkdir -p .claude/session/reviews
+git rev-parse HEAD > .claude/session/reviews/<pr>-design.approved
+```
+
+For projects that deliberately skip design review (admin tools, internal dashboards), `touch .claude/session/reviews/<pr>-design.approved` is a visible, auditable "we decided to skip" artifact rather than an invisible omission. Future ticket: add a `/skip-design-review` skill that records the reason alongside the marker.
+
+**Enforces:** `.claude/rules/pr-quality.md § "Design Review (UI Changes)"` and `workflows/code-review.md § "UI Designer (conditional)"` — both prose-only until this hook shipped.
+
+### 9. No-red-CI merge gate — `block-merge-on-red-ci.sh`
+
+**Event:** `PreToolUse` on `Bash(gh pr merge *)`.
+
+**What it does:** runs `gh pr checks <pr>` on the target PR and blocks if any check is failing, cancelled, timed out, pending, or in-progress.
+
+**State handling:**
+
+| State | Behavior |
+|-------|----------|
+| All green | Allow |
+| Any failing / cancelled / timed out | **Block** with the check output in the error message |
+| Any pending / in-progress / queued | **Block** (pending is not green; wait for CI to finish, then retry) |
+| "No checks reported" (no CI configured) | Allow with a NOTE to stderr — legitimate state for early apexstack forks |
+
+**Enforces:** `.claude/rules/pr-quality.md § "No Red CI Before Merge"` — "Never merge with red CI, even if the failure is pre-existing or unrelated." Was prose-only.
+
+### 10. Commit-format validator — `validate-commit-format.sh`
+
+**Event:** `PreToolUse` on `Bash(git commit *)`.
+
+**What it does:** parses the commit message from `-m` or `-F` args (multi-line safe, same pattern as `verify-commit-refs.sh`) and validates the subject line against:
+
+```
+^(feat|fix|refactor|test|docs|chore|style|perf|build|ci|revert)(\([^)]+\))?:[[:space:]]+.+
+```
+
+Accepts `type: subject` and `type(scope): subject`. Rejects subjects without a valid type prefix.
+
+**Why this list of types:** identical to the PR-title type list in `git-conventions.md`, plus `revert` which PR titles allow. Keeping the commit-type list aligned with the PR-title list prevents "commit passes but PR title using the same type fails" asymmetry.
+
+**Interactive commits (no `-m` / `-F`)** are skipped — accepted gap, matches sibling hooks' policy.
+
+**Enforces:** `.claude/rules/git-conventions.md § "Commit Message Format"` — was prose-only.
+
+## Settings Ordering Note
+
+The new hooks are registered in `.claude/settings.json` alongside the existing ones on the same `Bash(git commit *)` / `Bash(gh pr merge *)` matchers. The Claude Code harness runs all matching hooks sequentially, and **any exit-2 blocks the tool call**. Order of registration within a matcher block is execution order. Current order (GH-13 additions shown in **bold**):
+
+**On `git commit`:**
+1. `check-secrets.sh`
+2. `verify-commit-refs.sh`
+3. **`validate-commit-format.sh`**
+4. **`require-agdr-for-arch-changes.sh`**
+
+**On `gh pr merge`:**
+1. `block-unreviewed-merge.sh` (Rex + CEO markers)
+2. **`require-design-review-for-ui.sh`**
+3. **`block-merge-on-red-ci.sh`**
+
+The ordering is deliberate: cheap local checks first, expensive remote checks (`gh pr checks`) last, so that a merge already blocked by Rex/CEO/design markers doesn't pay the network cost.
+
 ## Pre-existing Hooks
 
 These were already in place before the enforcement layer and remain unchanged (except `validate-pr-create.sh` which was extended in GH-14 — see above). The newer hooks layer on top; nothing below is regressed.
@@ -117,10 +226,10 @@ These were already in place before the enforcement layer and remain unchanged (e
 |------|-------|---------|
 | `block-git-add-all.sh` | PreToolUse / Bash | Blocks `git add -A / . / --all` |
 | `block-main-push.sh` | PreToolUse / Bash | Blocks pushing to `main` / `master` |
-| `validate-branch-name.sh` | PreToolUse / Bash | Warns on non-conforming branch names before push |
+| `validate-branch-name.sh` | PreToolUse / Bash | **Warns** on non-conforming branch names before push (warning-only; warning→blocker upgrade deferred to a follow-up ticket — breaking change) |
 | `check-secrets.sh` | PreToolUse / Bash | Scans commits for hardcoded secrets |
 | `pre-push-gate.sh` | PreToolUse / Bash | Reminds to run lint / typecheck / test / build |
-| `validate-pr-create.sh` | PreToolUse / Bash | Checks PR title format, glossary, branch ID, **and verifies the title's issue number exists (extended in GH-14)** |
+| `validate-pr-create.sh` | PreToolUse / Bash | **Warns** on title format / glossary / branch ID. **Blocks** when the title's issue number doesn't exist in the tracker (extended in GH-14). Warning→blocker upgrade for the format checks deferred. |
 
 ## Session State Directory
 
