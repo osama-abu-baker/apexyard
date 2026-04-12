@@ -61,13 +61,24 @@ fi
 #   type: subject         (no scope)
 #   type(scope): subject  (with scope — superset)
 #
-# Types per .claude/rules/git-conventions.md:
-#   feat, fix, refactor, test, docs, chore, style, perf
+# Default types per .claude/rules/git-conventions.md:
+#   feat, fix, refactor, test, docs, chore, style, perf, build, ci, revert
 #
-# ApexStack also accepts (build, ci, revert) since those types appear in the
-# PR-title regex in git-conventions.md — staying consistent prevents commit
-# messages from being valid in PR titles but not commits.
-TYPE_REGEX='^(feat|fix|refactor|test|docs|chore|style|perf|build|ci|revert)(\([^)]+\))?:[[:space:]]+.+'
+# Projects can override the type list via .claude/project-config.json:
+#   { "commit_types": ["wip", "feat", "fix"] }
+# When set, ONLY those types are accepted. The default list is NOT merged —
+# the override replaces it entirely. This lets teams with strict conventions
+# whitelist exactly the types they use.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+DEFAULT_TYPES="feat|fix|refactor|test|docs|chore|style|perf|build|ci|revert"
+TYPES="$DEFAULT_TYPES"
+if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/.claude/project-config.json" ]; then
+  CUSTOM=$(jq -r '.commit_types // [] | join("|")' "${REPO_ROOT}/.claude/project-config.json" 2>/dev/null)
+  if [ -n "$CUSTOM" ] && [ "$CUSTOM" != "null" ] && [ "$CUSTOM" != "" ]; then
+    TYPES="$CUSTOM"
+  fi
+fi
+TYPE_REGEX="^(${TYPES})(\([^)]+\))?:[[:space:]]+.+"
 
 if ! echo "$SUBJECT" | grep -qE "$TYPE_REGEX"; then
   cat >&2 <<MSG_END

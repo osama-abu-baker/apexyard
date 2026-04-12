@@ -50,6 +50,8 @@ Typical answers (adapt to stack):
 
 Capture per sub-project if monorepo; the `pre-push-gate.sh` hook will later reference these.
 
+**Optional follow-up:** if the project uses non-standard commit types (e.g. `wip`, `security`, `deps`), ask whether to set `.commit_types` in `project-config.json` to override the default 11-type list. Most projects don't need this — only ask if the CI checks or team conventions differ from the standard `feat|fix|refactor|test|docs|chore|style|perf|build|ci|revert` list.
+
 ### Q4: Reviewers
 
 ```

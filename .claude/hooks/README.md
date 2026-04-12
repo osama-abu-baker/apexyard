@@ -200,6 +200,14 @@ Accepts `type: subject` and `type(scope): subject`. Rejects subjects without a v
 
 **Why this list of types:** identical to the PR-title type list in `git-conventions.md`, plus `revert` which PR titles allow. Keeping the commit-type list aligned with the PR-title list prevents "commit passes but PR title using the same type fails" asymmetry.
 
+**Customize:** set `.commit_types` in `.claude/project-config.json` to a JSON array of strings. When set, ONLY those types are accepted — the default list is **not** merged; the override replaces it entirely. This lets teams with strict conventions whitelist exactly the types they use:
+
+```json
+{ "commit_types": ["wip", "feat", "fix"] }
+```
+
+With that config, `wip: scratch work` is accepted and `refactor: cleanup` is rejected. Remove the field or the file to restore the default 11-type list.
+
 **Interactive commits (no `-m` / `-F`)** are skipped — accepted gap, matches sibling hooks' policy.
 
 **Enforces:** `.claude/rules/git-conventions.md § "Commit Message Format"` — was prose-only.
