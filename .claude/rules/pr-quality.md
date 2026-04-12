@@ -29,7 +29,7 @@ This prevents merging code that was pushed after the last review.
 
 ## Design Review (UI Changes)
 
-If the PR touches user-facing UI → design review is required before merge.
+If the PR touches user-facing UI → design review is required before merge. Mechanically enforced by `require-design-review-for-ui.sh` (blocks merge without a design marker) and the `/approve-design <pr>` skill (writes the marker on explicit designer approval). See `.claude/skills/approve-design/SKILL.md` for the full invocation rules.
 
 ## QA Gate Checklist
 

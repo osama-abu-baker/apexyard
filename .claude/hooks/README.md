@@ -158,14 +158,9 @@ design-tokens
 
 **Customize:** `.ui_paths` in `.claude/project-config.json`.
 
-**Marker writing:** there is no `/approve-design` skill yet; the design reviewer (or UI Designer role) writes the marker manually:
+**Companion skill:** `/approve-design <pr>` (in `.claude/skills/approve-design/`) writes the marker. It follows the same pattern as `/approve-merge`: verify PR state → verify Rex marker at HEAD → write the design marker at the repo root → confirm → stop. The skill definition includes explicit valid/invalid triggers and an anti-pattern section distinguishing mockup approval (design phase) from implementation-review approval (PR phase).
 
-```bash
-mkdir -p .claude/session/reviews
-git rev-parse HEAD > .claude/session/reviews/<pr>-design.approved
-```
-
-For projects that deliberately skip design review (admin tools, internal dashboards), `touch .claude/session/reviews/<pr>-design.approved` is a visible, auditable "we decided to skip" artifact rather than an invisible omission. Future ticket: add a `/skip-design-review` skill that records the reason alongside the marker.
+**Manual fallback:** for projects that deliberately skip design review (admin tools, internal dashboards), `touch .claude/session/reviews/<pr>-design.approved` is a visible, auditable "we decided to skip" artifact rather than an invisible omission.
 
 **Enforces:** `.claude/rules/pr-quality.md § "Design Review (UI Changes)"` and `workflows/code-review.md § "UI Designer (conditional)"` — both prose-only until this hook shipped.
 
