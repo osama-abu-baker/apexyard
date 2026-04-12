@@ -166,15 +166,23 @@ ApexStack ships with a `.claude/` directory containing the Claude Code primitive
 | Hooks | `.claude/hooks/` | 15 shell scripts that mechanically enforce SDLC rules — ticket-first, auto code review, merge gates (Rex + CEO + design review), red-CI block, commit format, AgDR for arch changes, branch/PR-title validation, secrets scanning |
 | Rules | `.claude/rules/` | 9 modular rule files (AgDR triggers, code standards, git conventions, PR quality, PR workflow, role triggers, ticket vocabulary, workflow gates) |
 | Agents | `.claude/agents/` | Specialised sub-agents (Code Reviewer, Security Reviewer, Dependency Auditor, PR Manager, Ticket Manager) |
-| Skills | `.claude/skills/` | 18 slash commands — see the full list below |
+| Skills | `.claude/skills/` | 27 slash commands — see the full list below |
 | Settings | `.claude/settings.json` | Wires hooks to `PreToolUse`, `PostToolUse`, and `SessionStart` events |
 
-### Available skills (18)
+### Available skills (27)
 
 | Skill | Purpose |
 |-------|---------|
 | `/setup` | **First-run bootstrap** — describe your stack, accept defaults, configure `onboarding.yaml` in 3 exchanges |
-| `/launch-check` | **Production readiness audit** — 8-dimension sweep (security, accessibility, compliance, analytics, SEO, performance, monitoring, docs) with go/no-go verdict. Use at milestone boundaries, not per-PR. |
+| `/launch-check` | **Production readiness audit** — 8-dimension sweep with go/no-go verdict. Use at milestone boundaries, not per-PR. Each dimension has a dedicated deep-dive skill below. |
+| `/threat-model` | STRIDE threat modelling — spoofing, tampering, repudiation, info disclosure, DoS, privilege escalation |
+| `/accessibility-audit` | WCAG 2.1 AA compliance — perceivable, operable, understandable, robust |
+| `/compliance-check` | GDPR + ePrivacy — cookie consent, privacy policy, data handling, user rights |
+| `/analytics-audit` | Event taxonomy — SDK coverage, naming conventions, funnel completeness |
+| `/seo-audit` | Technical SEO — meta tags, sitemap, robots.txt, Open Graph, structured data |
+| `/performance-audit` | Bundle and Core Web Vitals — size, images, lazy loading, code splitting |
+| `/monitoring-audit` | Observability — error tracking, health endpoints, alerting, runbooks |
+| `/docs-audit` | Diataxis documentation — tutorials, how-to guides, reference, explanation |
 | `/start-ticket` | Declare an active ticket for this session (required before code edits) |
 | `/approve-merge` | Record per-PR CEO approval for a specific merge (required by merge gate) |
 | `/approve-design` | Record per-PR design-review approval for UI PRs (required by design gate) |

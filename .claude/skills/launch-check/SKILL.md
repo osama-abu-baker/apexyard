@@ -12,6 +12,23 @@ Runs an 8-dimension sweep against a project and outputs a one-page verdict. Desi
 
 **Invoke from** the project's workspace directory (`cd workspace/<project>/`) or pass the path as an argument: `/launch-check workspace/my-app`.
 
+## Deep-dive companions
+
+Each dimension has a dedicated expert skill for when you need to go deeper than the one-line summary. The launch check is the overview; the expert skills are the investigation.
+
+| Dimension | Quick check | Deep dive |
+|-----------|------------|-----------|
+| Security | `/launch-check` row 1 | **`/threat-model`** — full STRIDE threat modelling exercise |
+| Accessibility | `/launch-check` row 2 | **`/accessibility-audit`** — WCAG 2.1 AA compliance audit |
+| Compliance | `/launch-check` row 3 | **`/compliance-check`** — GDPR + ePrivacy analysis |
+| Analytics | `/launch-check` row 4 | **`/analytics-audit`** — event taxonomy and funnel coverage |
+| SEO | `/launch-check` row 5 | **`/seo-audit`** — technical SEO against Google best practices |
+| Performance | `/launch-check` row 6 | **`/performance-audit`** — bundle, images, Core Web Vitals |
+| Monitoring | `/launch-check` row 7 | **`/monitoring-audit`** — observability and incident readiness |
+| Documentation | `/launch-check` row 8 | **`/docs-audit`** — Diataxis framework completeness |
+
+When a dimension shows WARN or FAIL, tell the user: *"For a detailed analysis, run `/threat-model`"* (or the relevant expert skill).
+
 ## Output format
 
 The output should be **scannable in 10 seconds**. One table, one verdict, one blockers list:
