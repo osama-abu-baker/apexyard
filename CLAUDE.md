@@ -163,23 +163,27 @@ ApexStack ships with a `.claude/` directory containing the Claude Code primitive
 
 | Layer | Path | Purpose |
 |-------|------|---------|
-| Hooks | `.claude/hooks/` | Shell scripts that block / warn on risky operations (`git add -A`, push to main, hardcoded secrets, branch / PR-title format) |
-| Rules | `.claude/rules/` | Modular rule files imported into your project's `CLAUDE.md` (AgDR triggers, code standards, git conventions, PR quality, workflow gates) |
+| Hooks | `.claude/hooks/` | 14 shell scripts that mechanically enforce SDLC rules — ticket-first, auto code review, merge gates (Rex + CEO + design review), red-CI block, commit format, AgDR for arch changes, branch/PR-title validation, secrets scanning |
+| Rules | `.claude/rules/` | 9 modular rule files (AgDR triggers, code standards, git conventions, PR quality, PR workflow, role triggers, ticket vocabulary, workflow gates) |
 | Agents | `.claude/agents/` | Specialised sub-agents (Code Reviewer, Security Reviewer, Dependency Auditor, PR Manager, Ticket Manager) |
-| Skills | `.claude/skills/` | 13 slash commands — see the full list below |
-| Settings | `.claude/settings.json` | Wires the hooks to `PreToolUse` events |
+| Skills | `.claude/skills/` | 17 slash commands — see the full list below |
+| Settings | `.claude/settings.json` | Wires hooks to `PreToolUse`, `PostToolUse`, and `SessionStart` events |
 
-### Available skills (13)
+### Available skills (17)
 
 | Skill | Purpose |
 |-------|---------|
+| `/setup` | **First-run bootstrap** — describe your stack, accept defaults, configure `onboarding.yaml` in 3 exchanges |
+| `/start-ticket` | Declare an active ticket for this session (required before code edits) |
+| `/approve-merge` | Record per-PR CEO approval for a specific merge (required by merge gate) |
+| `/approve-design` | Record per-PR design-review approval for UI PRs (required by design gate) |
 | `/decide` | Make a technical decision and create an Agent Decision Record (AgDR) |
 | `/code-review` | Invoke the Code Reviewer agent (Rex) on a PR |
 | `/security-review` | Invoke the Security Reviewer agent (Shield) on a PR |
 | `/audit-deps` | Audit dependencies for vulnerabilities, outdated packages, licences |
 | `/write-spec` | Generate a PRD or feature spec from a problem statement |
 | `/idea` | Capture a new product idea to the backlog |
-| `/handover` | Onboard an external repo into ApexStack management |
+| `/handover` | Onboard an external repo into ApexStack management (includes per-project discovery) |
 | `/projects` | List all managed projects from the registry with status |
 | `/inbox` | Items needing your attention — PRs, issues, comments, blockers |
 | `/status` | Current snapshot — git, CI, in-progress work |

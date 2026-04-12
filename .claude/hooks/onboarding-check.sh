@@ -1,46 +1,39 @@
 #!/bin/bash
-# SessionStart hook: checks whether this repo has been onboarded to ApexStack.
-# If not, injects a visible reminder so Claude prompts the user to run /onboard
-# before doing any work.
+# SessionStart hook: checks whether this ApexStack fork has been configured.
 #
-# "Onboarded" means .claude/session/onboarded exists. The /onboard skill creates
-# it after asking the discovery questions (project identity, tracker repo,
-# required CI checks, reviewers, UI/backend, deploy targets, sensitive topics).
+# Detection: reads onboarding.yaml and checks if company.name is still the
+# placeholder value "Your Company Name". If so, the fork hasn't been set up
+# yet and the user should run /setup.
 #
-# Same principle as the role-triggers rule: don't start work until you know
-# who, what, why, and under which constraints.
+# Why onboarding.yaml and not a session marker: onboarding.yaml is COMMITTED,
+# so the setup state persists across clones and team members. A fresh clone
+# of a configured fork already has real values — no per-machine marker needed.
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-MARKER="${REPO_ROOT:-.}/.claude/session/onboarded"
+CONFIG="${REPO_ROOT:-.}/onboarding.yaml"
 
-if [ -f "$MARKER" ]; then
+# No onboarding.yaml at all — not an apexstack fork, skip silently
+if [ ! -f "$CONFIG" ]; then
   exit 0
 fi
 
-cat <<MSG
-APEXSTACK ONBOARDING NOT RUN
+# Check if the placeholder is still present
+if grep -q '"Your Company Name"' "$CONFIG" 2>/dev/null; then
+  cat <<MSG
+APEXSTACK SETUP NOT RUN
 
-This repository has no onboarding marker at:
-  ${MARKER}
+This fork hasn't been configured yet. onboarding.yaml still has
+placeholder values ("Your Company Name").
 
-ApexStack needs a short discovery pass before the first session so hooks,
-reviewers, and gates know:
+Run /setup to configure your fork in ~2 minutes:
 
-  - What project this is and where its code + tickets live
-  - Which CI checks must run before push (lint, typecheck, test, build,
-    framework-specific validators like \`sam validate --lint\` or \`terraform validate\`)
-  - Who the reviewers are (Rex + human approver — Tech Lead, CEO, owner)
-  - Whether this repo has UI work (design-review gate)
-  - Deploy targets (staging, prod, where URLs live, auto-on-merge or manual)
-  - Sensitive topics (anything that must never land in git or public issues)
+  1. Describe your company and tech stack (one question)
+  2. Review the proposed defaults
+  3. Accept or customize
 
-Before starting any work in this repo, ask the user to run:
-
-  /onboard
-
-The skill will ask the questions and write both the marker above and
-.claude/project-config.json. If the user wants to skip onboarding for a quick
-one-off, they can:
-  touch ${MARKER}
+The config is committed to onboarding.yaml so it persists across
+clones and team members — you only need to do this once per fork.
 MSG
+fi
+
 exit 0
