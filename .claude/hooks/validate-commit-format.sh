@@ -58,8 +58,10 @@ if [ -z "$SUBJECT" ]; then
 fi
 
 # Validate:
-#   type: subject         (no scope)
-#   type(scope): subject  (with scope — superset)
+#   type: subject              (no scope)
+#   type(scope): subject       (with scope)
+#   type!: subject             (breaking change, Conventional Commits 1.0)
+#   type(scope)!: subject      (breaking change with scope)
 #
 # Default types per .claude/rules/git-conventions.md:
 #   feat, fix, refactor, test, docs, chore, style, perf, build, ci, revert
@@ -78,7 +80,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/.claude/project-config.json" ]; the
     TYPES="$CUSTOM"
   fi
 fi
-TYPE_REGEX="^(${TYPES})(\([^)]+\))?:[[:space:]]+.+"
+TYPE_REGEX="^(${TYPES})(\([^)]+\))?!?:[[:space:]]+.+"
 
 if ! echo "$SUBJECT" | grep -qE "$TYPE_REGEX"; then
   cat >&2 <<MSG_END
@@ -90,6 +92,8 @@ Subject was:
 Expected format (from .claude/rules/git-conventions.md):
   type: subject
   type(scope): subject
+  type!: subject             (breaking change)
+  type(scope)!: subject      (breaking change with scope)
 
 Where type is one of:
   feat, fix, refactor, test, docs, chore, style, perf, build, ci, revert
@@ -97,6 +101,8 @@ Where type is one of:
 Examples:
   feat: add user avatar upload
   fix(auth): handle expired refresh tokens
+  feat!: remove deprecated v1 endpoints
+  feat(api)!: change response format to JSON:API
   refactor: split order service into read/write sides
   docs(#42): update deployment runbook
 

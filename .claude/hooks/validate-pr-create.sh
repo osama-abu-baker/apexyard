@@ -30,12 +30,13 @@ if [ -z "$TITLE" ]; then
 fi
 
 # Validate PR title format if we can extract it
-# Accepts: type(<UPPERCASE-PREFIX 2-10 chars>-<digits>): … or type(#<digits>): …
+# Accepts: type(<TICKET>): … or type(<TICKET>)!: … (breaking change)
+# The !? makes the breaking-change marker optional per Conventional Commits 1.0.
 # Note: this pattern is intentionally aligned with the pr-title-check.yml
 # CI workflow regex so anything that passes this hook also passes CI.
 TICKET_REF=""
 if [ -n "$TITLE" ]; then
-  if ! echo "$TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)\(([A-Z]{2,10}-[0-9]+|#[0-9]+)\):'; then
+  if ! echo "$TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)\(([A-Z]{2,10}-[0-9]+|#[0-9]+)\)!?:'; then
     ERRORS="${ERRORS}PR title '$TITLE' doesn't match format: type(TICKET-ID): description\n"
   else
     # Extract the ticket reference so we can verify it exists
