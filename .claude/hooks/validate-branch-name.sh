@@ -30,9 +30,10 @@ fi
 # Note: this pattern is intentionally aligned with the pr-title-check.yml
 # CI workflow regex so anything that passes this hook also passes CI.
 if ! echo "$CURRENT_BRANCH" | grep -qE '^(feature|fix|refactor|chore|docs|test|spike|ci|build|perf)/([A-Z]{2,10}-[0-9]+|GH-[0-9]+|#[0-9]+)-'; then
-  echo "WARNING: Branch '$CURRENT_BRANCH' doesn't follow naming convention: {type}/{TICKET-ID}-{description}" >&2
+  echo "BLOCKED: Branch '$CURRENT_BRANCH' doesn't follow naming convention: {type}/{TICKET-ID}-{description}" >&2
   echo "Examples: feature/ABC-123-add-auth, fix/GH-45-login-bug, docs/ENG-99-update-readme" >&2
-  # Warning only — does not block
+  echo "Rename with: git branch -m \"\$(git branch --show-current)\" \"feature/GH-XX-description\"" >&2
+  exit 2
 fi
 
 exit 0

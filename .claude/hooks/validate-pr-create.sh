@@ -97,9 +97,12 @@ if [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BR
 fi
 
 if [ -n "$ERRORS" ]; then
-  echo "PR VALIDATION WARNINGS:" >&2
+  echo "PR VALIDATION BLOCKED:" >&2
   printf "$ERRORS" >&2
-  # Warning only, not blocking — PR creation has valid edge cases
+  echo "" >&2
+  echo "Fix the issues above before creating the PR." >&2
+  echo "See .claude/rules/git-conventions.md and .claude/rules/pr-quality.md." >&2
+  exit 2
 fi
 
 exit 0

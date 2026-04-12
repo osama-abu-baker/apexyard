@@ -232,7 +232,7 @@ These were already in place before the enforcement layer and remain unchanged (e
 | `validate-branch-name.sh` | PreToolUse / Bash | **Warns** on non-conforming branch names before push (warning-only; warning→blocker upgrade deferred to a follow-up ticket — breaking change) |
 | `check-secrets.sh` | PreToolUse / Bash | Scans commits for hardcoded secrets |
 | `pre-push-gate.sh` | PreToolUse / Bash | Reminds to run lint / typecheck / test / build |
-| `validate-pr-create.sh` | PreToolUse / Bash | **Warns** on title format / glossary / branch ID. **Blocks** when the title's issue number doesn't exist in the tracker (extended in GH-14). Warning→blocker upgrade for the format checks deferred. |
+| `validate-pr-create.sh` | PreToolUse / Bash | **Blocks** on title format / glossary / branch ID (upgraded from warning in GH-20). Also **blocks** when the title's issue number doesn't exist in the tracker (extended in GH-14). |
 
 ## Session State Directory
 

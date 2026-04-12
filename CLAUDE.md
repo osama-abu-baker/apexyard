@@ -88,6 +88,7 @@ Work on ONE ticket at a time. Complete fully before starting next. Each PR = one
 
 ### Quality Rules
 
+- **Branch names and PR titles are enforced, not warned** -- as of 2026-04-12 (#20), `validate-branch-name.sh` and `validate-pr-create.sh` block (exit 2) instead of warn on malformed branch names, PR titles, missing glossary, and missing branch ticket IDs. Fix the format — see @.claude/rules/git-conventions.md
 - **No direct pushes to main** -- every change through a PR
 - **Tests required** -- >80% coverage for domain logic
 - **Lint, typecheck, test, build** must pass before pushing
