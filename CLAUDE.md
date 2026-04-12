@@ -163,17 +163,18 @@ ApexStack ships with a `.claude/` directory containing the Claude Code primitive
 
 | Layer | Path | Purpose |
 |-------|------|---------|
-| Hooks | `.claude/hooks/` | 14 shell scripts that mechanically enforce SDLC rules — ticket-first, auto code review, merge gates (Rex + CEO + design review), red-CI block, commit format, AgDR for arch changes, branch/PR-title validation, secrets scanning |
+| Hooks | `.claude/hooks/` | 15 shell scripts that mechanically enforce SDLC rules — ticket-first, auto code review, merge gates (Rex + CEO + design review), red-CI block, commit format, AgDR for arch changes, branch/PR-title validation, secrets scanning |
 | Rules | `.claude/rules/` | 9 modular rule files (AgDR triggers, code standards, git conventions, PR quality, PR workflow, role triggers, ticket vocabulary, workflow gates) |
 | Agents | `.claude/agents/` | Specialised sub-agents (Code Reviewer, Security Reviewer, Dependency Auditor, PR Manager, Ticket Manager) |
-| Skills | `.claude/skills/` | 17 slash commands — see the full list below |
+| Skills | `.claude/skills/` | 18 slash commands — see the full list below |
 | Settings | `.claude/settings.json` | Wires hooks to `PreToolUse`, `PostToolUse`, and `SessionStart` events |
 
-### Available skills (17)
+### Available skills (18)
 
 | Skill | Purpose |
 |-------|---------|
 | `/setup` | **First-run bootstrap** — describe your stack, accept defaults, configure `onboarding.yaml` in 3 exchanges |
+| `/launch-check` | **Production readiness audit** — 8-dimension sweep (security, accessibility, compliance, analytics, SEO, performance, monitoring, docs) with go/no-go verdict. Use at milestone boundaries, not per-PR. |
 | `/start-ticket` | Declare an active ticket for this session (required before code edits) |
 | `/approve-merge` | Record per-PR CEO approval for a specific merge (required by merge gate) |
 | `/approve-design` | Record per-PR design-review approval for UI PRs (required by design gate) |

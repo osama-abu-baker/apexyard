@@ -1288,7 +1288,7 @@ footer.foot {
 <span class="branch">│</span>
 <span class="branch">├──</span> <span class="dir new">.claude/</span>               <span class="nf"># <span class="new">[NEW]</span> Claude Code primitives — the runnable layer</span>
 <span class="branch">│   ├──</span> <span class="lf">settings.json</span>     <span class="nf"># Wires hooks to PreToolUse events</span>
-<span class="branch">│   ├──</span> <span class="dir">hooks/</span>            <span class="nf"># 6 enforcement scripts</span>
+<span class="branch">│   ├──</span> <span class="dir">hooks/</span>            <span class="nf"># 15 enforcement hooks (ticket-first, merge gates, CI checks…)</span>
 <span class="branch">│   │   ├──</span> <span class="lf">block-git-add-all.sh</span>     <span class="nf"># refuses git add -A / .</span>
 <span class="branch">│   │   ├──</span> <span class="lf">block-main-push.sh</span>       <span class="nf"># refuses push to main</span>
 <span class="branch">│   │   ├──</span> <span class="lf">check-secrets.sh</span>         <span class="nf"># scans staged files for credentials</span>
@@ -1308,7 +1308,7 @@ footer.foot {
 <span class="branch">│   │   ├──</span> <span class="lf">dependency-auditor.md</span>    <span class="nf"># Guardian — vulns, outdated, licenses</span>
 <span class="branch">│   │   ├──</span> <span class="lf">pr-manager.md</span>            <span class="nf"># 2-review workflow + SHA verification</span>
 <span class="branch">│   │   └──</span> <span class="lf">ticket-manager.md</span>        <span class="nf"># GitHub Issues per project</span>
-<span class="branch">│   └──</span> <span class="dir">skills/</span>           <span class="nf"># 13 slash commands</span>
+<span class="branch">│   └──</span> <span class="dir">skills/</span>           <span class="nf"># 19 slash commands (/setup, /launch-check, /approve-merge…)</span>
 <span class="branch">│       ├──</span> <span class="lf">decide/SKILL.md</span>          <span class="nf"># /decide — creates an AgDR</span>
 <span class="branch">│       ├──</span> <span class="lf">code-review/SKILL.md</span>     <span class="nf"># /code-review</span>
 <span class="branch">│       ├──</span> <span class="lf">security-review/SKILL.md</span> <span class="nf"># /security-review</span>
@@ -1404,7 +1404,7 @@ footer.foot {
       <div class="layer__num">03 — runnable · executable <span class="new">NEW</span></div>
       <h3 class="layer__title">Hooks + rules</h3>
       <p class="layer__desc">
-        Six shell hooks block dangerous git operations and enforce standards on every <code>Bash</code> tool call. Six modular rule files import into your <code>CLAUDE.md</code> via <code>@-imports</code> so Claude inherits the standards in every conversation.
+        15 shell hooks mechanically enforce the SDLC on every tool call — ticket-first gates, auto code review, two-marker merge gates (Rex + CEO), design review for UI, red-CI blocking, commit format validation, and AgDR requirements for architecture changes. Nine modular rule files import via <code>@-imports</code>. A <code>/launch-check</code> skill runs an 8-dimension production-readiness audit at milestone boundaries.
       </p>
       <ul class="layer__list">
         <li><code>hooks/</code><span>git add -A · main push · secrets · branch / PR format</span></li>
