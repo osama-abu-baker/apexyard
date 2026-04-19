@@ -1,0 +1,10 @@
+# Publish directory is set in the Netlify UI (site/).
+# This file only contributes security headers so they live in source.
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "interest-cohort=()"
