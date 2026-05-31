@@ -241,6 +241,52 @@ MSG
   exit 2
 fi
 
+# --------- Jira-tracked tickets: GitHub verification is impossible ---------
+# `gh issue view` only resolves GitHub Issues. When the active ticket key is
+# a Jira-style key (e.g. ITH-88), the GitHub gates below can never pass, so
+# fall back to verifying locally that a migration AgDR referencing this
+# ticket exists. See ITH-94 + the standing rule that apexyard hooks must not
+# check GitHub for Jira-tracked references.
+if echo "$TICKET_NUM" | grep -qE '^[A-Z][A-Z0-9]+-[0-9]+$'; then
+  AGDR_SEARCH_DIRS="$MARKER_HOME/docs/agdr"
+  if [ -f "$PCONFIG" ] && command -v jq >/dev/null 2>&1; then
+    pdir=$(jq -r '.portfolio.projects_dir // empty' "$PCONFIG" 2>/dev/null)
+    if [ -n "$pdir" ]; then
+      case "$pdir" in
+        /*) : ;;
+        *)  pdir="$MARKER_HOME/$pdir" ;;
+      esac
+      AGDR_SEARCH_DIRS="$AGDR_SEARCH_DIRS $pdir"
+    fi
+  fi
+
+  AGDR_HIT=""
+  for d in $AGDR_SEARCH_DIRS; do
+    [ -d "$d" ] || continue
+    AGDR_HIT=$(find "$d" -type f -name 'AgDR-*migration*.md' \
+      -exec grep -lF "$TICKET_NUM" {} + 2>/dev/null | head -1)
+    [ -n "$AGDR_HIT" ] && break
+  done
+
+  if [ -z "$AGDR_HIT" ]; then
+    cat >&2 <<MSG
+BLOCKED: Active migration ticket ${TICKET_NUM} is Jira-tracked, so the
+GitHub issue verification is skipped — but no migration AgDR referencing
+${TICKET_NUM} was found locally.
+
+A migration-class change needs a paired AgDR capturing rollback plan,
+downtime, cross-service consumers, and observability. Create one with
+/migration, or make sure the existing AgDR's body mentions ${TICKET_NUM}.
+
+Searched: $AGDR_SEARCH_DIRS
+MSG
+    exit 2
+  fi
+
+  echo "require-migration-ticket: ${TICKET_NUM} is Jira-tracked — GitHub label/body checks skipped; verified migration AgDR $AGDR_HIT references it." >&2
+  exit 0
+fi
+
 # --------- Gate 2: issue is open + has migration label ---------
 ISSUE_JSON=$(gh issue view "$TICKET_NUM" --repo "$TICKET_REPO" --json state,labels,body 2>/dev/null)
 if [ -z "$ISSUE_JSON" ]; then
