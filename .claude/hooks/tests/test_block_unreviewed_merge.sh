@@ -244,6 +244,99 @@ approval_summary="user said: 211 approved, ship it"
 EOF
 run_case "structured marker with quoted multi-word summary → allows" 0 "" "$sb" 211
 
+# 13. Workspace-clone scenario (apexyard#229 + #230). Sandbox simulates
+#     an ops fork at $sb (with onboarding.yaml + apexyard.projects.yaml
+#     + _lib-ops-root.sh) and a workspace clone underneath at
+#     $sb/workspace/demo/ (with its own .git/). Markers live in the OPS
+#     FORK's reviews dir. Hook runs with cwd = workspace clone. Should
+#     pass — the OPS_ROOT walk in the hook resolves up to the ops fork.
+sb=$(make_sandbox)
+# Add the apexyard.projects.yaml that resolve_ops_root requires.
+: > "$sb/apexyard.projects.yaml"
+# Copy _lib-ops-root.sh into the sandbox's hook dir.
+cp "$SRC_ROOT/.claude/hooks/_lib-ops-root.sh" "$sb/.claude/hooks/_lib-ops-root.sh"
+# Build a workspace clone underneath, with its own git toplevel.
+mkdir -p "$sb/workspace/demo"
+( cd "$sb/workspace/demo" && git init -q )
+# Markers exist at the OPS FORK's reviews dir (where the agent + skill write).
+write_rex_marker "$sb" 212
+write_ceo_marker_structured "$sb" 212
+# Run the hook from inside workspace/demo cwd (not the ops fork).
+input=$(jq -nc --arg c "gh pr merge 212 --repo me2resh/apexyard" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb/workspace/demo" && PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash $sb/.claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
+  echo "PASS [workspace-clone cwd → resolves markers from ops fork (#229+#230)]"; PASS=$((PASS+1))
+else
+  echo "FAIL [workspace-clone cwd → resolves markers from ops fork (#229+#230)]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}workspace-clone-resolves-up "
+fi
+
+# --- Compound command tests (#426) ------------------------------------
+
+# Helper: run with a custom command string (not just `gh pr merge <N>`)
+run_case_custom_cmd() {
+  local label="$1" want_rc="$2" want_stderr_regex="$3" sb="$4" cmd="$5"
+  local input
+  input=$(jq -nc --arg c "$cmd" '{tool_name:"Bash", tool_input:{command:$c}}')
+  local got_stderr got_rc
+  got_stderr=$(cd "$sb" && PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+  got_rc=$?
+  rm -rf "$sb"
+  if [ "$got_rc" != "$want_rc" ]; then
+    echo "FAIL [$label]: want rc=$want_rc, got $got_rc (stderr: ${got_stderr:0:300})" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  if [ -n "$want_stderr_regex" ] && ! echo "$got_stderr" | grep -qE "$want_stderr_regex"; then
+    echo "FAIL [$label]: stderr did not match /$want_stderr_regex/" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  echo "PASS [$label]"
+  PASS=$((PASS+1))
+}
+
+# Case: compound command with valid inline marker + merge → should PASS
+sb=$(make_sandbox)
+write_rex_marker "$sb" 42
+cmd="cat > $sb/.claude/session/reviews/42-ceo.approved <<EOF
+sha=${FIXED_SHA}
+approved_by=user
+approved_at=2026-05-27T12:00:00Z
+skill_version=2
+approval_summary=test
+EOF
+gh pr merge 42 --repo me2resh/apexyard --squash"
+run_case_custom_cmd "compound-valid-inline-marker" 0 "" "$sb" "$cmd"
+
+# Case: compound command with WRONG SHA in inline marker → should BLOCK
+sb=$(make_sandbox)
+write_rex_marker "$sb" 42
+cmd="cat > $sb/.claude/session/reviews/42-ceo.approved <<EOF
+sha=${WRONG_SHA}
+approved_by=user
+skill_version=2
+EOF
+gh pr merge 42 --repo me2resh/apexyard --squash"
+run_case_custom_cmd "compound-wrong-sha-inline" 2 "CEO approved commit" "$sb" "$cmd"
+
+# Case: compound command with missing approved_by in inline → should BLOCK
+sb=$(make_sandbox)
+write_rex_marker "$sb" 42
+cmd="printf 'sha=${FIXED_SHA}\nskill_version=2\n' > $sb/.claude/session/reviews/42-ceo.approved && gh pr merge 42 --repo me2resh/apexyard --squash"
+run_case_custom_cmd "compound-missing-approved-by" 2 "no CEO approval marker" "$sb" "$cmd"
+
+# Case: compound command with skill_version=1 in inline → should BLOCK
+sb=$(make_sandbox)
+write_rex_marker "$sb" 42
+cmd="cat > $sb/.claude/session/reviews/42-ceo.approved <<EOF
+sha=${FIXED_SHA}
+approved_by=user
+skill_version=1
+EOF
+gh pr merge 42 --repo me2resh/apexyard --squash"
+run_case_custom_cmd "compound-old-skill-version" 2 "no CEO approval marker" "$sb" "$cmd"
+
 # --- Summary ----------------------------------------------------------
 
 echo ""
