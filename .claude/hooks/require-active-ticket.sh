@@ -4,17 +4,22 @@
 # in CLAUDE.md, workflows/sdlc.md, or .claude/rules/workflow-gates.md.
 #
 # Active tickets are declared by the /start-ticket skill. The marker
-# layout is two-tier (apexyard#41):
+# layout is three-tier (apexyard#41 + #513):
 #
-#   ops_root/.claude/session/tickets/<project>    ← per-project, preferred
-#   ops_root/.claude/session/current-ticket       ← ops-repo / fallback
+#   ops_root/.claude/session/tickets/<project>/<branch>  ← per-worktree (#513)
+#   ops_root/.claude/session/tickets/<project>           ← per-project (#41)
+#   ops_root/.claude/session/current-ticket              ← ops-repo / fallback
 #
-# Resolution order for a given FILE_PATH:
-#   1. If FILE_PATH is under ops_root/workspace/<project>/, look up
-#      ops_root/.claude/session/tickets/<project>. If present → exempt.
-#   2. Fall back to ops_root/.claude/session/current-ticket. If present →
-#      exempt.
+# Resolution order for a given FILE_PATH under ops_root/workspace/<project>/:
+#   0. If the file's repo is on a git worktree branch (or CLAUDE_WORKTREE_BRANCH
+#      is set), look up tickets/<project>/<safe-branch>. If present → exempt.
+#      (Lets parallel agents on the SAME project hold independent tickets.)
+#   1. Look up tickets/<project> (a FILE). If present → exempt.
+#   2. Fall back to current-ticket. If present → exempt.
 #   3. Otherwise, block with instructions.
+#
+# tickets/<project> is a FILE in single-agent mode, a DIRECTORY in worktree
+# mode; the `-f` tests keep tiers 0 and 1 from conflicting.
 #
 # Ops root is the apexyard fork root (has both onboarding.yaml and
 # apexyard.projects.yaml at the top level). It's discovered by walking
@@ -215,6 +220,42 @@ if [ -z "$PROJECT" ] && [ -n "$OPS_ROOT" ]; then
   esac
 fi
 
+# Tier 0 — per-worktree marker (#513): when two agents are fanned out on the
+# SAME managed project in parallel git worktrees, each must declare its ticket
+# independently or they collide on the shared per-project file (last-writer-wins,
+# silent wrong-ticket pass). A branch-scoped marker at
+# tickets/<project>/<safe-branch> is resolved BEFORE the per-project tier.
+# Single-agent / non-worktree flows have no such marker and fall straight
+# through to the per-project tier — no behaviour change. Note: tickets/<project>
+# is a FILE in single-agent mode and a DIRECTORY in worktree mode; the `-f`
+# tests below distinguish them, so the two tiers never conflict.
+PER_WORKTREE_MARKER=""
+if [ -n "$PROJECT" ]; then
+  # Branch: prefer the harness-set env var (populated at worktree spawn). Else
+  # only treat the file's repo as worktree-scoped when it's a LINKED worktree,
+  # detected by comparing the ABSOLUTE git-dir against the ABSOLUTE common-dir
+  # (they differ only in a linked worktree). This matches /start-ticket's
+  # write-side detection exactly — no read/write asymmetry — and the absolute
+  # forms avoid the false positive where, in the main checkout from a subdir,
+  # `--git-dir` is absolute but `--git-common-dir` is relative.
+  WT_BRANCH="${CLAUDE_WORKTREE_BRANCH:-}"
+  if [ -z "$WT_BRANCH" ]; then
+    _fdir=$(dirname "$FILE_PATH")
+    _gd=$(git -C "$_fdir" rev-parse --absolute-git-dir 2>/dev/null)
+    _gcd=$(git -C "$_fdir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -n "$_gd" ] && [ "$_gd" != "$_gcd" ]; then
+      WT_BRANCH=$(git -C "$_fdir" branch --show-current 2>/dev/null)
+    fi
+  fi
+  if [ -n "$WT_BRANCH" ]; then
+    SAFE_BRANCH="${WT_BRANCH//\//__}"   # '/' → '__' for a filesystem-safe segment
+    PER_WORKTREE_MARKER="$MARKER_HOME/.claude/session/tickets/$PROJECT/$SAFE_BRANCH"
+    if [ -f "$PER_WORKTREE_MARKER" ]; then
+      exit 0
+    fi
+  fi
+fi
+
 PER_PROJECT_MARKER=""
 if [ -n "$PROJECT" ]; then
   PER_PROJECT_MARKER="$MARKER_HOME/.claude/session/tickets/$PROJECT"
@@ -249,6 +290,7 @@ To unblock:
   3. Retry the edit
 
 Markers looked up for this path (in order):
+$([ -n "$PER_WORKTREE_MARKER" ] && echo "  per-worktree: $PER_WORKTREE_MARKER")
 $([ -n "$PER_PROJECT_MARKER" ] && echo "  per-project:  $PER_PROJECT_MARKER")
   ops fallback: $FALLBACK_MARKER
 
