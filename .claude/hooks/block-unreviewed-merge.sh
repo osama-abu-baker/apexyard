@@ -73,6 +73,14 @@ if [ -z "$CMD_REPO" ]; then
   CMD_REPO=$(echo "$COMMAND" | grep -oE 'repos/[^/[:space:]]+/[^/[:space:]]+/pulls/[0-9]+/merge' | sed -nE 's|repos/([^/]+/[^/]+)/pulls/.*|\1|p' | head -1)
 fi
 
+# Repo named explicitly IN the command text (--repo flag or api URL path).
+# Kept separate from CMD_REPO below, which may fall back to `headRepository`
+# — the repo holding the PR's HEAD BRANCH, which for a fork -> upstream PR is
+# not the repo the PR lives in. That distinction is harmless for scoping
+# marker filenames but wrong for querying the PR's reviews, so the review
+# lookup uses this value and resolves the PR's own base repo when it is empty.
+REVIEW_REPO="$CMD_REPO"
+
 PR_NUMBER=$(extract_pr_number "$COMMAND")
 # Also extract the repo so markers are scoped to (repo, pr) — #485.
 # CMD_REPO already parsed above; resolve via helper if blank (e.g. current-branch fallback).
@@ -207,7 +215,7 @@ fi
 if [ "${APEXYARD_SKIP_REVIEW_CORROBORATION:-}" = "1" ]; then
   echo "WARN: review-existence corroboration skipped (APEXYARD_SKIP_REVIEW_CORROBORATION=1) for PR #${PR_NUMBER}." >&2
 elif [ -n "$CURRENT_SHA" ]; then
-  _REVIEWS_AT_HEAD=$(count_reviews_at_commit "$PR_NUMBER" "$CMD_REPO" "$CURRENT_SHA")
+  _REVIEWS_AT_HEAD=$(count_reviews_at_commit "$PR_NUMBER" "$REVIEW_REPO" "$CURRENT_SHA")
   if [ "$_REVIEWS_AT_HEAD" = "unknown" ]; then
     echo "WARN: could not reach the GitHub reviews API for PR #${PR_NUMBER} — merging on the marker alone, uncorroborated. Re-run when connectivity returns if you want the check enforced." >&2
   elif [ "$_REVIEWS_AT_HEAD" -eq 0 ] 2>/dev/null; then

@@ -159,22 +159,24 @@ count_reviews_at_commit() {
   command -v gh >/dev/null 2>&1 || { echo "unknown"; return; }
 
   if [ -z "$repo" ]; then
-    # Derive from the ORIGIN remote, not `gh repo view`. In a fork, gh resolves
-    # to the parent (`me2resh/apexyard` rather than `<you>/apexyard`), so the
-    # query would count reviews on somebody else's PR of the same number and
-    # return a confident wrong answer instead of `unknown`. PRs live where we
-    # push, which is origin.
-    repo=$(git remote get-url origin 2>/dev/null \
-             | sed -E 's#^git@[^:]+:#https://x/#' \
-             | sed -E 's#^[a-z]+://[^/]+/##' \
-             | sed -E 's#\.git$##')
+    # Ask the PR itself which repo it lives in, rather than inferring from a
+    # remote. A PR lives in its BASE repo, and in the fork -> upstream pattern
+    # the framework supports, that is neither `origin` (which holds the head
+    # branch) nor reliably what a bare `gh repo view` reports.
+    #
+    # Deriving it from `gh pr view <N> --json url` keeps this consistent with
+    # resolve_pr_head BY CONSTRUCTION: both resolve the PR the same way, so
+    # they cannot end up reading a HEAD from one repo and reviews from another.
+    # An earlier cut used the origin remote and produced exactly that split
+    # brain -- upstream's HEAD checked against the fork's reviews, count 0,
+    # merge blocked.
+    repo=$(gh pr view "$pr_number" --json url --jq '.url' 2>/dev/null \
+             | sed -E 's#^https?://[^/]+/##; s#/pull/[0-9]+/?$##')
     case "$repo" in
-      */*) : ;;
-      *)   repo="" ;;
+      */*/*) repo="" ;;   # more path segments than owner/repo -- unparsed
+      */*)   : ;;
+      *)     repo="" ;;
     esac
-    # No origin remote (bare checkout, test sandbox) — fall back to gh's own
-    # resolution. Less accurate in a fork, but better than refusing to check.
-    [ -z "$repo" ] && repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
     [ -z "$repo" ] && { echo "unknown"; return; }
   fi
 

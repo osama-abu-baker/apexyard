@@ -78,6 +78,7 @@ case "\$*" in
   *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
+  *"pr view"*"url"*)            echo "https://github.com/me2resh/apexyard/pull/1" ;;
   *) ;;
 esac
 exit 0
@@ -386,6 +387,29 @@ if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "uncorroborated"; then
 else
   echo "FAIL [non-numeric API output → unknown, fails open]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}reviews-non-numeric "
+fi
+
+# 10g. No --repo on the merge command → the repo-resolution fallback runs.
+# Every other case here passes --repo, so without this the fallback is dead
+# code as far as the suite is concerned (proved during review of PR #4: fully
+# reverting it left the suite green).
+#
+# It must resolve the SAME repo resolve_pr_head resolves. An earlier cut used
+# the origin remote, which in a fork points at the head repo while gh resolves
+# the PR in the base repo — the HEAD came from one and the reviews from the
+# other, count 0, merge blocked. This case pins them together.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 225
+write_ceo_marker_structured "$sb" 225
+input=$(jq -nc --arg c "gh pr merge 225 --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
+  echo "PASS [no --repo → fallback resolves the PR's own base repo]"; PASS=$((PASS+1))
+else
+  echo "FAIL [no --repo → fallback resolves the PR's own base repo]: rc=$got_rc stderr=${got_stderr:0:220}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}no-repo-fallback "
 fi
 
 # 11. The gh-api merge shape is also gated (#47 — same coverage check).
