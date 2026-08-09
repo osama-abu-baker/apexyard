@@ -194,6 +194,53 @@ MSG
   exit 2
 fi
 
+# --- Rex marker corroboration: a review must actually exist at this commit ---
+#
+# The marker alone proves only that a file containing this SHA exists. Ask
+# GitHub whether a review is pinned to the same commit, so an approval
+# cannot rest on a local file write nothing stands behind.
+#
+# Fail-OPEN on an unreachable API, matching resolve_pr_head's fallback
+# above: a network blip or expired auth must not brick every merge. The
+# warning is deliberately loud, because this is the one path where the
+# corroboration silently does not happen.
+if [ "${APEXYARD_SKIP_REVIEW_CORROBORATION:-}" = "1" ]; then
+  echo "WARN: review-existence corroboration skipped (APEXYARD_SKIP_REVIEW_CORROBORATION=1) for PR #${PR_NUMBER}." >&2
+elif [ -n "$CURRENT_SHA" ]; then
+  _REVIEWS_AT_HEAD=$(count_reviews_at_commit "$PR_NUMBER" "$CMD_REPO" "$CURRENT_SHA")
+  if [ "$_REVIEWS_AT_HEAD" = "unknown" ]; then
+    echo "WARN: could not reach the GitHub reviews API for PR #${PR_NUMBER} — merging on the marker alone, uncorroborated. Re-run when connectivity returns if you want the check enforced." >&2
+  elif [ "$_REVIEWS_AT_HEAD" -eq 0 ] 2>/dev/null; then
+    cat >&2 <<MSG
+BLOCKED: PR #${PR_NUMBER} has a Rex marker for ${CURRENT_SHA:0:7}, but GitHub holds
+no review posted at that commit.
+
+The marker is a local file containing a commit hash. On its own it proves
+only that the file exists — not that a review happened. GitHub records a
+commit_id on every posted review, and none of this PR's reviews point at
+the current HEAD.
+
+That means one of:
+  - the review was never actually posted (the marker stands behind nothing)
+  - the review was posted against an older commit and HEAD has since moved
+  - the marker was written by hand
+
+To unblock:
+  1. Invoke the code-reviewer agent on PR #${PR_NUMBER} and let it post its review
+  2. Confirm it appears:  gh pr view ${PR_NUMBER} --json reviews
+  3. Retry the merge
+
+This is an EXISTENCE check, not an author-independence check — a review from
+the PR author's own account satisfies it (see AgDR-0062 for why independence
+is not enforceable on a single-maintainer account).
+
+Escape hatch, for a genuinely offline/mirrored tracker only:
+  APEXYARD_SKIP_REVIEW_CORROBORATION=1
+MSG
+    exit 2
+  fi
+fi
+
 # --- CEO marker check ---
 # If the marker file doesn't exist on disk, check whether the COMMAND
 # itself will create it (compound command: `cat > marker && gh pr merge`).

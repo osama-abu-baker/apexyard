@@ -115,6 +115,65 @@ resolve_pr_head() {
   echo "$sha"
 }
 
+# Echoes the number of reviews GitHub holds for a PR that are pinned to a
+# specific commit, or "unknown" if the API could not be reached.
+#
+# WHY THIS EXISTS
+#
+# An approval marker is a bare SHA in a local, gitignored file. The merge
+# gate compares that SHA to the PR's HEAD, which verifies "a file exists
+# whose contents are this commit hash" — NOT "a review happened at this
+# commit". Nothing links the marker to a review, so anything able to write
+# a file satisfies the gate.
+#
+# GitHub already records the missing fact: every posted review carries a
+# `commit_id`. Requiring one review pinned to the PR's HEAD means forging
+# an approval needs a review published to a public tracker — visible,
+# timestamped, auditable — rather than a silent local file write.
+#
+# NOT an author-independence check. AgDR-0062 deferred that because Rex
+# posts from the same account that opened the PR, so an independence rule
+# would block every merge in a single-maintainer setup. This checks
+# EXISTENCE only, and works unchanged on one account. It also cannot rely
+# on review state: GitHub forces self-reviews to COMMENTED and refuses
+# APPROVED, so state is not a usable signal here. The marker still carries
+# the verdict; this only corroborates that a review was really posted.
+#
+# Usage:
+#   n=$(count_reviews_at_commit "$PR_NUMBER" "$CMD_REPO" "$SHA")
+#   [ "$n" = "unknown" ] && : # API unreachable — caller decides
+#
+# Returns "unknown" (not 0) when gh is missing or the API call fails, so a
+# caller can distinguish "no review exists" from "could not tell".
+count_reviews_at_commit() {
+  local pr_number="$1"
+  local cmd_repo="$2"
+  local commit="$3"
+  local repo="$cmd_repo"
+  local out=""
+
+  if [ -z "$pr_number" ] || [ -z "$commit" ]; then
+    echo "unknown"
+    return
+  fi
+  command -v gh >/dev/null 2>&1 || { echo "unknown"; return; }
+
+  if [ -z "$repo" ]; then
+    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    [ -z "$repo" ] && { echo "unknown"; return; }
+  fi
+
+  # --paginate: a long-lived PR can exceed one page of reviews, and the
+  # review at HEAD is the newest — i.e. the one a single-page fetch drops.
+  out=$(gh api --paginate "repos/${repo}/pulls/${pr_number}/reviews" \
+          --jq "[.[] | select(.commit_id == \"${commit}\")] | length" 2>/dev/null) || { echo "unknown"; return; }
+
+  # --paginate emits one count per page; sum them.
+  out=$(echo "$out" | awk 'BEGIN{s=0} /^[0-9]+$/{s+=$1; seen=1} END{if(seen) print s; else print "unknown"}')
+  [ -z "$out" ] && out="unknown"
+  echo "$out"
+}
+
 # Echoes the owner/repo extracted from the merge command, or empty if not found.
 #
 # This is a SIBLING function to extract_pr_number — same parsing approach,

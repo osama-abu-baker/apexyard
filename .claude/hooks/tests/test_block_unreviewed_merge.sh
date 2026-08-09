@@ -65,6 +65,8 @@ make_sandbox() {
 # Minimal gh shim for test_block_unreviewed_merge.
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *) ;;
@@ -243,6 +245,64 @@ else
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}non-merge "
 fi
 
+# 10b. Review-existence corroboration: valid markers, but GitHub holds NO review
+# pinned to the PR's HEAD → BLOCKED. This is the case a marker alone cannot
+# detect — the file exists and its SHA matches, and nothing stands behind it.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 220
+write_ceo_marker_structured "$sb" 220
+# Rewrite the shim so the reviews query reports zero reviews at HEAD.
+cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr view"*"headRefOid"*)      echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)         echo "0" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"pr view"*"headRefName"*)     echo "feature/GH-99-test" ;;
+  *"pr view"*"headRepository"*)  echo "me2resh/apexyard" ;;
+  *) ;;
+esac
+exit 0
+EOF
+chmod +x "$sb/bin/gh"
+input=$(jq -nc --arg c "gh pr merge 220 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "2" ] && echo "$got_stderr" | grep -q "no review posted at that commit"; then
+  echo "PASS [no review at HEAD → blocks even with valid markers]"; PASS=$((PASS+1))
+else
+  echo "FAIL [no review at HEAD → blocks even with valid markers]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}no-review-at-head "
+fi
+
+# 10c. Same sandbox shape, but the documented escape hatch is set → passes.
+# Guards against the check becoming unbypassable for offline / mirrored trackers.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 221
+write_ceo_marker_structured "$sb" 221
+cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr view"*"headRefOid"*)      echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)         echo "0" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *) ;;
+esac
+exit 0
+EOF
+chmod +x "$sb/bin/gh"
+input=$(jq -nc --arg c "gh pr merge 221 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 APEXYARD_SKIP_REVIEW_CORROBORATION=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "corroboration skipped"; then
+  echo "PASS [escape hatch bypasses corroboration, loudly]"; PASS=$((PASS+1))
+else
+  echo "FAIL [escape hatch bypasses corroboration, loudly]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}corroboration-escape-hatch "
+fi
+
 # 11. The gh-api merge shape is also gated (#47 — same coverage check).
 sb=$(make_sandbox)
 write_rex_marker "$sb" 210
@@ -387,6 +447,8 @@ make_sandbox_with_sync_branch() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "$branch_name" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *) ;;
@@ -404,6 +466,8 @@ make_sandbox_non_sync() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-something" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *) ;;
@@ -510,6 +574,8 @@ make_sandbox_for_repo() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/test" ;;
   *"pr view"*"headRepository"*) echo "$repo" ;;
   *) ;;
