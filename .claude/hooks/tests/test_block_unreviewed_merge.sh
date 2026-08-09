@@ -65,7 +65,16 @@ make_sandbox() {
 # Minimal gh shim for test_block_unreviewed_merge.
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
-  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"pulls/"*"/reviews"*)
+    # Emit a real reviews fixture and apply the caller's --jq with real jq,
+    # so the commit_id filter under test is actually executed. Answering
+    # with a constant here would let the filter be deleted undetected.
+    _jq=""; _prev=""
+    for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
+    _fx="\${GH_REVIEWS_FIXTURE:-}"
+    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
+    ;;
   *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
@@ -303,6 +312,82 @@ else
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}corroboration-escape-hatch "
 fi
 
+# 10d. THE discriminating case: reviews exist, but none at the PR HEAD.
+# This is the real-world shape "the review was posted against an older commit
+# and HEAD has since moved". It is the only case that exercises the commit_id
+# filter itself: a fixture with zero reviews blocks even if the filter is
+# deleted, but this one passes unless the filter genuinely pins to the commit.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 222
+write_ceo_marker_structured "$sb" 222
+input=$(jq -nc --arg c "gh pr merge 222 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 \
+  GH_REVIEWS_FIXTURE="[{\"commit_id\":\"$WRONG_SHA\"},{\"commit_id\":\"$WRONG_SHA\"}]" \
+  PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "2" ] && echo "$got_stderr" | grep -q "no review posted at that commit"; then
+  echo "PASS [reviews exist but none at HEAD → blocks (commit pinning)]"; PASS=$((PASS+1))
+else
+  echo "FAIL [reviews exist but none at HEAD → blocks (commit pinning)]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}reviews-not-at-head "
+fi
+
+# 10e. Fail-open path: the reviews API is unreachable → warn, do not block.
+# AgDR-0068 names this the gate's weakest path, so it must at least be pinned
+# by a test rather than left to assumption.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 223
+write_ceo_marker_structured "$sb" 223
+cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr view"*"headRefOid"*) echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)    exit 1 ;;
+  *) ;;
+esac
+exit 0
+EOF
+chmod +x "$sb/bin/gh"
+input=$(jq -nc --arg c "gh pr merge 223 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "uncorroborated"; then
+  echo "PASS [unreachable reviews API → fails open with a warning]"; PASS=$((PASS+1))
+else
+  echo "FAIL [unreachable reviews API → fails open with a warning]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}reviews-api-fail-open "
+fi
+
+# 10f. gh exits 0 but emits something non-numeric (API shape change, auth
+# banner, partial output). The awk sum must yield `unknown` and fail open —
+# NOT silently treat unparseable output as zero, which would block every
+# merge on a cosmetic upstream change.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 224
+write_ceo_marker_structured "$sb" 224
+cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr view"*"headRefOid"*) echo "$FIXED_SHA" ;;
+  *"pulls/"*"/reviews"*)    echo "gh: unexpected response" ;;
+  *) ;;
+esac
+exit 0
+EOF
+chmod +x "$sb/bin/gh"
+input=$(jq -nc --arg c "gh pr merge 224 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "uncorroborated"; then
+  echo "PASS [non-numeric API output → unknown, fails open]"; PASS=$((PASS+1))
+else
+  echo "FAIL [non-numeric API output → unknown, fails open]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}reviews-non-numeric "
+fi
+
 # 11. The gh-api merge shape is also gated (#47 — same coverage check).
 sb=$(make_sandbox)
 write_rex_marker "$sb" 210
@@ -447,7 +532,16 @@ make_sandbox_with_sync_branch() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
-  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"pulls/"*"/reviews"*)
+    # Emit a real reviews fixture and apply the caller's --jq with real jq,
+    # so the commit_id filter under test is actually executed. Answering
+    # with a constant here would let the filter be deleted undetected.
+    _jq=""; _prev=""
+    for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
+    _fx="\${GH_REVIEWS_FIXTURE:-}"
+    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
+    ;;
   *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "$branch_name" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
@@ -466,7 +560,16 @@ make_sandbox_non_sync() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
-  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"pulls/"*"/reviews"*)
+    # Emit a real reviews fixture and apply the caller's --jq with real jq,
+    # so the commit_id filter under test is actually executed. Answering
+    # with a constant here would let the filter be deleted undetected.
+    _jq=""; _prev=""
+    for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
+    _fx="\${GH_REVIEWS_FIXTURE:-}"
+    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
+    ;;
   *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-something" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
@@ -574,7 +677,16 @@ make_sandbox_for_repo() {
 #!/bin/bash
 case "\$*" in
   *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
-  *"pulls/"*"/reviews"*)     echo "${GH_REVIEWS_AT_HEAD:-1}" ;;
+  *"pulls/"*"/reviews"*)
+    # Emit a real reviews fixture and apply the caller's --jq with real jq,
+    # so the commit_id filter under test is actually executed. Answering
+    # with a constant here would let the filter be deleted undetected.
+    _jq=""; _prev=""
+    for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
+    _fx="\${GH_REVIEWS_FIXTURE:-}"
+    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
+    ;;
   *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/test" ;;
   *"pr view"*"headRepository"*) echo "$repo" ;;

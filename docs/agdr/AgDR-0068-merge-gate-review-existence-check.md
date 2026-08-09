@@ -48,14 +48,30 @@ Chosen: **Option D**.
 - Every gated merge now makes one additional API call. Negligible against the merge itself, but merges now fail differently when GitHub is down (warn-and-proceed rather than proceed-silently).
 - **Timing asymmetry with the marker.** A review posted at HEAD *after* the marker was written still satisfies the check. The gate verifies both artifacts point at the same commit, not that they were produced in a particular order.
 - `require-architecture-review.sh` has the same marker-only shape and is unchanged. It should reuse `count_reviews_at_commit()` — deliberately out of scope here to keep the change reviewable.
+- **Repo resolution when no `--repo` flag is present.** The first cut fell back to `gh repo view`, which in a fork resolves to the **parent** (`me2resh/apexyard`, not `<owner>/apexyard`). That would count reviews on a stranger's PR of the same number and return a confident wrong answer rather than `unknown` — the worst failure shape for a check like this. It now derives from the `origin` remote, which is where PRs are pushed, and falls back to `gh repo view` only when there is no origin (bare checkout, test sandbox) so the check degrades instead of refusing. Found in review of PR #4; latent today because both merge shapes carry an explicit repo, but live the moment another caller omits it.
 
 ## Verification
 
-Against live GitHub data: `0` at a HEAD pushed after its last review (would block), `1` at the commit that was reviewed, `1` and `3` at two merged PRs' HEADs, `unknown` for an unreachable repo and for empty arguments.
+Against live GitHub data in **`ithbatiam/ithbat-backend`**: `0` at a HEAD pushed after its last review (would block), `1` at the commit that was reviewed, `1` and `3` at two merged PRs' HEADs, `unknown` for an unreachable repo and for empty arguments.
 
-No false positives on real history — every already-merged PR checked would have passed.
+**This gate would not have passed all history, and the earlier claim that it would was wrong.** It held for `ithbat-backend`, which is where the numbers above were measured, and was then overgeneralised. In **this** repo `GET /pulls/1/reviews` returns `[]` — PR #1 is merged with zero reviews and would have been blocked. Corrected after review of PR #4.
 
-Hook suite 29 → 31. The four in-test `gh` shims gained the `pulls/*/reviews` and `repo view --json nameWithOwner` cases the hook now calls; without that the pass-path assertions fail on unexpected stderr, which is how the omission was found. Non-vacuity proven: changing the trigger to `-eq 999` makes the block case fail, and restoring it returns 31/0.
+That is the correct behaviour, not a defect: a merge with no review is exactly what the gate exists to stop. But it means **adopting this on a repo with unreviewed history will block re-merges of old branches**, and adopters should expect that rather than be surprised by it.
+
+Hook suite 29 → 34.
+
+The four in-test `gh` shims initially answered the reviews query with a **constant**, which meant the `commit_id` filter — the entire point of the change — was never executed. Review of PR #4 proved it: deleting the filter (`select(true)`) left the suite at 31/0. The shims now emit a JSON fixture and apply the caller's `--jq` through real `jq`, and the discriminating case is *reviews exist but none at HEAD* (a fixture of zero reviews blocks even with the filter deleted; only a non-empty fixture at the wrong commit distinguishes them).
+
+Neuter results at 34 cases:
+
+| Neuter | Suite |
+|---|---|
+| commit pinning deleted (`select(true)`) | 33/1 |
+| gate trigger `-eq 0` → `-eq 999` | 32/2 |
+| `unknown` fallback removed from the awk sum | 33/1 |
+| `--paginate` removed | **34/0 — not covered** |
+
+`--paginate` behaviour was verified against the live API (forcing `?per_page=1` yields one count per page, summing correctly; without it the later page is dropped) but is **not** pinned by a unit test. Stated rather than papered over.
 
 ## Artifacts
 

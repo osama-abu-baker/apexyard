@@ -159,7 +159,22 @@ count_reviews_at_commit() {
   command -v gh >/dev/null 2>&1 || { echo "unknown"; return; }
 
   if [ -z "$repo" ]; then
-    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    # Derive from the ORIGIN remote, not `gh repo view`. In a fork, gh resolves
+    # to the parent (`me2resh/apexyard` rather than `<you>/apexyard`), so the
+    # query would count reviews on somebody else's PR of the same number and
+    # return a confident wrong answer instead of `unknown`. PRs live where we
+    # push, which is origin.
+    repo=$(git remote get-url origin 2>/dev/null \
+             | sed -E 's#^git@[^:]+:#https://x/#' \
+             | sed -E 's#^[a-z]+://[^/]+/##' \
+             | sed -E 's#\.git$##')
+    case "$repo" in
+      */*) : ;;
+      *)   repo="" ;;
+    esac
+    # No origin remote (bare checkout, test sandbox) — fall back to gh's own
+    # resolution. Less accurate in a fork, but better than refusing to check.
+    [ -z "$repo" ] && repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
     [ -z "$repo" ] && { echo "unknown"; return; }
   fi
 
