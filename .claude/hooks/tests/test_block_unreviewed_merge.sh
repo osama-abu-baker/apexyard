@@ -49,6 +49,9 @@ make_sandbox() {
     : > onboarding.yaml
     git add onboarding.yaml
     git commit -q -m "init"
+    # Origin = the FORK (where a head branch is pushed). The PR itself lives in
+    # the base repo. Resolving reviews from origin is the bug case 10g guards.
+    git remote add origin https://github.com/osama-abu-baker/apexyard.git
   )
   mkdir -p "$sb/.claude/hooks" "$sb/.claude/session/reviews" "$sb/bin"
   cp "$HOOK_SRC"    "$sb/.claude/hooks/block-unreviewed-merge.sh"
@@ -72,10 +75,17 @@ case "\$*" in
     _jq=""; _prev=""
     for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
     _fx="\${GH_REVIEWS_FIXTURE:-}"
-    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    if [ -z "\$_fx" ]; then
+      # Only the PR's BASE repo holds reviews. A resolver that picks the head
+      # repo (origin, headRepository) queries a repo with none and is caught.
+      case "\$*" in
+        *"repos/osama-abu-baker/apexyard/pulls/"*) _fx='[]' ;;
+        *) _fx='[{"commit_id":"$FIXED_SHA"}]' ;;
+      esac
+    fi
     printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
     ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *"pr view"*"url"*)            echo "https://github.com/me2resh/apexyard/pull/1" ;;
@@ -267,7 +277,7 @@ cat > "$sb/bin/gh" <<EOF
 case "\$*" in
   *"pr view"*"headRefOid"*)      echo "$FIXED_SHA" ;;
   *"pulls/"*"/reviews"*)         echo "0" ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *"pr view"*"headRefName"*)     echo "feature/GH-99-test" ;;
   *"pr view"*"headRepository"*)  echo "me2resh/apexyard" ;;
   *) ;;
@@ -296,7 +306,7 @@ cat > "$sb/bin/gh" <<EOF
 case "\$*" in
   *"pr view"*"headRefOid"*)      echo "$FIXED_SHA" ;;
   *"pulls/"*"/reviews"*)         echo "0" ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *) ;;
 esac
 exit 0
@@ -410,6 +420,37 @@ if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
 else
   echo "FAIL [no --repo → fallback resolves the PR's own base repo]: rc=$got_rc stderr=${got_stderr:0:220}" >&2
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}no-repo-fallback "
+fi
+
+# 10h. The owner/repo shape guard. If the PR URL does not parse to exactly two
+# path segments, the value must be rejected and the check must fail open —
+# never queried as-is. Without the guard the malformed value is sent to the
+# API, which answers, and the merge proceeds on a lookup against a repo that
+# was never validated.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 226
+write_ceo_marker_structured "$sb" 226
+cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr view"*"headRefOid"*)     echo "$FIXED_SHA" ;;
+  *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
+  *"pr view"*"url"*)            echo "https://ghe.example.com/team/org/owner/repo/pull/1" ;;
+  *"pulls/"*"/reviews"*)        echo "1" ;;
+  *) ;;
+esac
+exit 0
+EOF
+chmod +x "$sb/bin/gh"
+input=$(jq -nc --arg c "gh pr merge 226 --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "uncorroborated"; then
+  echo "PASS [unparseable PR URL → rejected, fails open]"; PASS=$((PASS+1))
+else
+  echo "FAIL [unparseable PR URL → rejected, fails open]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}url-shape-guard "
 fi
 
 # 11. The gh-api merge shape is also gated (#47 — same coverage check).
@@ -563,10 +604,17 @@ case "\$*" in
     _jq=""; _prev=""
     for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
     _fx="\${GH_REVIEWS_FIXTURE:-}"
-    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    if [ -z "\$_fx" ]; then
+      # Only the PR's BASE repo holds reviews. A resolver that picks the head
+      # repo (origin, headRepository) queries a repo with none and is caught.
+      case "\$*" in
+        *"repos/osama-abu-baker/apexyard/pulls/"*) _fx='[]' ;;
+        *) _fx='[{"commit_id":"$FIXED_SHA"}]' ;;
+      esac
+    fi
     printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
     ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "$branch_name" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *) ;;
@@ -591,10 +639,17 @@ case "\$*" in
     _jq=""; _prev=""
     for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
     _fx="\${GH_REVIEWS_FIXTURE:-}"
-    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    if [ -z "\$_fx" ]; then
+      # Only the PR's BASE repo holds reviews. A resolver that picks the head
+      # repo (origin, headRepository) queries a repo with none and is caught.
+      case "\$*" in
+        *"repos/osama-abu-baker/apexyard/pulls/"*) _fx='[]' ;;
+        *) _fx='[{"commit_id":"$FIXED_SHA"}]' ;;
+      esac
+    fi
     printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
     ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/GH-99-something" ;;
   *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
   *) ;;
@@ -708,10 +763,17 @@ case "\$*" in
     _jq=""; _prev=""
     for _a in "\$@"; do [ "\$_prev" = "--jq" ] && _jq="\$_a"; _prev="\$_a"; done
     _fx="\${GH_REVIEWS_FIXTURE:-}"
-    [ -z "\$_fx" ] && _fx='[{"commit_id":"$FIXED_SHA"}]'
+    if [ -z "\$_fx" ]; then
+      # Only the PR's BASE repo holds reviews. A resolver that picks the head
+      # repo (origin, headRepository) queries a repo with none and is caught.
+      case "\$*" in
+        *"repos/osama-abu-baker/apexyard/pulls/"*) _fx='[]' ;;
+        *) _fx='[{"commit_id":"$FIXED_SHA"}]' ;;
+      esac
+    fi
     printf '%s' "\$_fx" | jq -r "\${_jq:-.}"
     ;;
-  *"repo view"*"nameWithOwner"*) echo "me2resh/apexyard" ;;
+  *"repo view"*"nameWithOwner"*) echo "osama-abu-baker/apexyard" ;;
   *"pr view"*"headRefName"*)    echo "feature/test" ;;
   *"pr view"*"headRepository"*) echo "$repo" ;;
   *) ;;
