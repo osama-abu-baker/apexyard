@@ -9,6 +9,12 @@ https://github.com/me2resh/SharpPick.*
 # rejected. Cited as a Source in docs/spikes/claude-model-tier-routing.md.
 https://medium\.com/@sathishkraju/.*
 
+# OpenAI and npm return 403 to lychee's bot user-agent (same class as the
+# Medium entry above — anti-scraping, not a dead link). Cited in
+# docs/conformance-ci.md and docs/spike-reports/pi-gate-extension.md.
+https://platform\.openai\.com/api-keys
+https://www\.npmjs\.com/package/@earendil-works/pi-coding-agent
+
 # Apex domains for the framework's own marketing site — Netlify is serving
 # its default *.netlify.app wildcard cert instead of a Let's Encrypt cert
 # matching the apex domain, so lychee's TLS verification fails. Pinned
