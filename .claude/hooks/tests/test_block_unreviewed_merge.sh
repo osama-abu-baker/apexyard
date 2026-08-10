@@ -55,6 +55,18 @@ make_sandbox() {
   cp "$LIB_PR"      "$sb/.claude/hooks/_lib-extract-pr.sh"
   cp "$LIB_MARKERS" "$sb/.claude/hooks/_lib-review-markers.sh"
   chmod +x "$sb/.claude/hooks/block-unreviewed-merge.sh"
+  # The hook sources the shared config reader (me2resh/apexyard#957, the
+  # configurable human_approver_title key) — mirror the same sandbox setup
+  # test_warn_stale_review_markers.sh already uses: copy the reader + the
+  # shipped defaults so config lookups resolve the same way they do in a
+  # real fork. Optional: harmless no-op for every case that doesn't touch
+  # review_markers.human_approver_title (they get the default "CEO").
+  if [ -f "$SRC_ROOT/.claude/hooks/_lib-read-config.sh" ]; then
+    cp "$SRC_ROOT/.claude/hooks/_lib-read-config.sh" "$sb/.claude/hooks/_lib-read-config.sh"
+  fi
+  if [ -f "$SRC_ROOT/.claude/project-config.defaults.json" ]; then
+    cp "$SRC_ROOT/.claude/project-config.defaults.json" "$sb/.claude/project-config.defaults.json"
+  fi
 
   # Mock `gh` so resolve_pr_head returns FIXED_SHA. The hook calls
   # `gh pr view <N> --json headRefOid -q '.headRefOid'` (or a similar
@@ -193,6 +205,20 @@ run_case "missing rex marker → blocks" 2 "no recorded code-reviewer" "$sb" 201
 sb=$(make_sandbox)
 write_rex_marker "$sb" 202
 run_case "missing ceo marker → blocks" 2 "no CEO approval marker" "$sb" 202
+
+# 3b. Configurable human_approver_title (me2resh/apexyard#957) — a custom
+# title configured via .claude/project-config.json flows through to the
+# BLOCKED message's prose, while the marker filename/path printed alongside
+# it is untouched (still "-ceo.approved"). This does NOT change the default
+# behaviour asserted by case 3 above — that case's sandbox has no override
+# file, so it still reads the shipped default ("CEO") and its literal
+# "no CEO approval marker" assertion is unaffected by this feature existing.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 957
+cat > "$sb/.claude/project-config.json" <<'EOF'
+{"review_markers": {"human_approver_title": "Maintainer"}}
+EOF
+run_case "custom human_approver_title flows through to BLOCKED message (#957)" 2 "no Maintainer approval marker" "$sb" 957
 
 # 4. Bare-SHA legacy CEO marker → blocks "stale or unrecognised format"
 sb=$(make_sandbox)
@@ -572,25 +598,102 @@ else
 fi
 rm -rf "$sb"
 
-# --- warn-review-marker-write.sh tests (#494) -------------------------
+# --- tracker_pr_merge wrapper shape tests (#759 gate-coverage regression) ---
 #
-# The advisory hook fires when a Write or Bash command targets a
-# *-rex.approved or *-ceo.approved file. It must always exit 0.
+# Hakim's review of #759 found that the gate hooks match the OUTER Bash
+# command text, not a call made by a sourced shell function — so
+# `/approve-merge`'s new `tracker_pr_merge <repo> <pr> <strategy> <del>`
+# wrapper sailed through completely ungated (is_merge_command never matched
+# it). These cases prove BOTH halves of the fix: the wrapper form is now
+# gate-recognised (is_merge_command/extractors), AND the sanctioned
+# /approve-merge flow — which writes both markers BEFORE calling the wrapper
+# — is unaffected by that new recognition.
+
+run_case_wrapper() {
+  local label="$1" want_rc="$2" want_stderr_regex="$3" sb="$4" pr="$5" repo="${6:-me2resh/apexyard}"
+  # The exact shape /approve-merge's SKILL.md step 7 emits: source the lib,
+  # then call tracker_pr_merge inside a command substitution.
+  local cmd
+  cmd=$(printf '. "%s/.claude/hooks/_lib-tracker.sh"\nMERGE_RESULT=$(tracker_pr_merge "%s" "%s" "squash" true)' "$sb" "$repo" "$pr")
+  local input
+  input=$(jq -nc --arg c "$cmd" '{tool_name:"Bash", tool_input:{command:$c}}')
+  local got_stderr got_rc
+  got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+  got_rc=$?
+  rm -rf "$sb"
+
+  if [ "$got_rc" != "$want_rc" ]; then
+    echo "FAIL [$label]: want rc=$want_rc, got $got_rc (stderr: ${got_stderr:0:300})" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  if [ -n "$want_stderr_regex" ] && ! echo "$got_stderr" | grep -qE "$want_stderr_regex"; then
+    echo "FAIL [$label]: stderr did not match /$want_stderr_regex/" >&2
+    echo "    stderr: $got_stderr" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  echo "PASS [$label]"
+  PASS=$((PASS+1))
+}
+
+# W-a/b: the wrapper form MATCHES is_merge_command and the extractors pull the
+# right pr/repo — proven indirectly: a wrapper call with NO markers at all
+# must be BLOCKED with the same "no recorded code-reviewer" message the gh
+# shape produces (if is_merge_command didn't match, or the extractor pulled
+# the wrong pr/repo, this would silently exit 0 instead).
+sb=$(make_sandbox)
+run_case_wrapper "wrapper: no markers → blocked (proves is_merge_command matches + pr/repo extracted)" 2 "no recorded code-reviewer" "$sb" 300
+
+# W-c: the sanctioned /approve-merge flow — CEO marker written in step 5,
+# BEFORE the step-7 wrapper call — still passes once both markers exist.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 301
+write_ceo_marker_structured "$sb" 301
+run_case_wrapper "wrapper: valid rex + valid v2 ceo → allows (legit /approve-merge flow unaffected)" 0 "" "$sb" 301
+
+# W-d: wrapper call with Rex approved but NO CEO marker → blocked. This is
+# the "out-of-skill tracker_pr_merge call" Hakim's fix asked to verify stays
+# blocked — a bare wrapper invocation with no CEO sign-off must not merge.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 302
+run_case_wrapper "wrapper: rex only, no ceo marker → blocked (out-of-skill call stays gated)" 2 "no CEO approval marker" "$sb" 302
+
+# W-e: cross-repo scoping still holds for the wrapper form — markers for a
+# DIFFERENT repo's same-numbered PR must not satisfy this repo's gate.
+sb=$(make_sandbox_for_repo "org-b/project-b")
+write_rex_marker "$sb" 100 "$FIXED_SHA" "org-a/project-a"
+write_ceo_marker_structured "$sb" 100 "$FIXED_SHA" "org-a/project-a"
+run_case_wrapper "wrapper: cross-repo markers do not satisfy the gate (#485 parity)" 2 "no recorded code-reviewer|no CEO approval marker" "$sb" 100 "org-b/project-b"
+
+# --- warn-review-marker-write.sh tests (#494; BLOCKING in #843, returned
+# --- to ADVISORY in #1026 per AgDR-0111) -------------------------------
+#
+# The hook fires when a Write or Bash command targets a *-rex.approved,
+# *-ceo.approved, *-security.approved, or *-architecture.approved file.
+# ALL roles are advisory: the hook warns and always exits 0 (#1026,
+# AgDR-0111). A matching .claude/session/active-reviewer marker suppresses
+# the warning for the sanctioned reviewer; it does not unblock anything,
+# because nothing is blocked. Full case coverage
+# (matching marker, kind/pr/repo mismatch, legacy bare filenames, security +
+# architecture roles) lives in the dedicated test_warn_review_marker_write.sh;
+# this file only keeps the original #494 smoke assertions in sync with the
+# new default behaviour.
 
 WARN_HOOK_SRC="$SRC_ROOT/.claude/hooks/warn-review-marker-write.sh"
 if [ ! -f "$WARN_HOOK_SRC" ]; then
   echo "FAIL: warn-review-marker-write.sh not found at $WARN_HOOK_SRC" >&2
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}warn-hook-missing "
 else
-  # W1: Write to a rex.approved path → advisory fires, exit 0
+  # W1: Write to a rex.approved path, no active-reviewer marker → WARNS, exit 0.
+  # Was BLOCKED/exit 2 from #843; returned to advisory in #1026 per AgDR-0111
+  # (the marker hook is a BACKSTOP — this file's own hook is the control).
   input=$(jq -nc --arg fp ".claude/session/reviews/me2resh__apexyard__42-rex.approved" \
     '{tool_name:"Write", tool_input:{file_path:$fp, content:"abc"}}')
   got_stderr=$(echo "$input" | bash "$WARN_HOOK_SRC" 2>&1 >/dev/null)
   got_rc=$?
-  if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "ADVISORY"; then
-    echo "PASS [warn-hook: Write to rex.approved → advisory + exit 0 (#494)]"; PASS=$((PASS+1))
+  if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "WARNING"; then
+    echo "PASS [warn-hook: Write to rex.approved with no active-reviewer marker → WARNS, exit 0 (#1026)]"; PASS=$((PASS+1))
   else
-    echo "FAIL [warn-hook: Write to rex.approved → advisory + exit 0]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+    echo "FAIL [warn-hook: Write to rex.approved → WARNS, exit 0]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
     FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}warn-hook-write-rex "
   fi
 
@@ -599,7 +702,7 @@ else
     '{tool_name:"Bash", tool_input:{command:$c}}')
   got_stderr=$(echo "$input" | bash "$WARN_HOOK_SRC" 2>&1 >/dev/null)
   got_rc=$?
-  if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "ADVISORY"; then
+  if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "VIOLATION"; then
     echo "PASS [warn-hook: Bash echo to ceo.approved → advisory + exit 0 (#494)]"; PASS=$((PASS+1))
   else
     echo "FAIL [warn-hook: Bash echo to ceo.approved → advisory + exit 0]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
@@ -629,6 +732,169 @@ else
     echo "FAIL [warn-hook: non-marker Bash → must be silent]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
     FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}warn-hook-nonmarker-bash "
   fi
+fi
+
+# --- Fail-closed on jq-unavailable/unparseable input (#965) ------------
+#
+# make_sandbox_broken_jq installs a `jq` stub in $sb/bin that ALWAYS fails
+# (exit 1, no stdout) — same code path as jq being entirely missing from
+# PATH, since either way `jq -r '.tool_input.command // empty'` yields
+# nothing. $sb/bin is prepended to PATH by run_case_custom_cmd, so this
+# stub shadows the real jq for the duration of the hook's invocation only.
+make_sandbox_broken_jq() {
+  local sb
+  sb=$(make_sandbox)
+  cat > "$sb/bin/jq" <<'EOF'
+#!/bin/bash
+# Simulates a broken/unavailable jq: always fails, no output. See #965.
+exit 1
+EOF
+  chmod +x "$sb/bin/jq"
+  echo "$sb"
+}
+
+# 14. jq broken + a real `gh pr merge` with NO approval markers at all →
+#     must BLOCK (exit 2). Pre-#965 this fell through the old
+#     `[ -z "$COMMAND" ] && exit 0` no-op and merged completely ungated.
+sb=$(make_sandbox_broken_jq)
+run_case_custom_cmd "#965: jq broken, gh pr merge with no markers -> BLOCKS (fail closed)" 2 \
+  "cannot evaluate this command" "$sb" \
+  "gh pr merge 300 --repo me2resh/apexyard --squash"
+
+# 15. jq broken + a CLEARLY non-merge Bash command → must stay a no-op
+#     (exit 0, no stderr). Proves the fail-closed fix does NOT block every
+#     Bash command in the session just because jq is broken — only the
+#     merge-shaped ones (the boundary the #965 fix is built around).
+sb=$(make_sandbox_broken_jq)
+cmd="npm test"
+input=$(jq -nc --arg c "$cmd" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
+  echo "PASS [#965: jq broken, clearly non-merge command -> stays a no-op]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#965: jq broken, clearly non-merge command -> stays a no-op]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}jq-broken-nonmerge-noop "
+fi
+
+# 16. jq broken + the gh-api merge shape (no `gh pr merge` substring at
+#     all) → must still BLOCK. Proves the raw-text fallback detector
+#     (is_merge_command reused against $INPUT) recognises every shape the
+#     normal parsed-command path recognises, not just the literal
+#     `gh pr merge` string.
+sb=$(make_sandbox_broken_jq)
+run_case_custom_cmd "#965: jq broken, gh-api merge shape -> BLOCKS (fail closed)" 2 \
+  "cannot evaluate this command" "$sb" \
+  "gh api repos/me2resh/apexyard/pulls/301/merge -X PUT"
+
+# --- Fail-closed on JSON-escaped separators in the raw-payload fallback
+#     (#973, Hakim's residual finding on the #965/#969 fix) ------------
+#
+# The #965 fallback (case 14 above) scans $INPUT — the RAW, still-JSON-
+# encoded payload text — directly, because jq (which would normally
+# decode it) is unavailable. That works for a normal space-separated
+# command because `gh`, `pr`, `merge` and the spaces between them survive
+# JSON string-encoding unchanged. But a command whose SEPARATORS are
+# themselves JSON-escaped (a literal tab encodes as the two-character
+# sequence `\t`) does NOT survive unchanged — those two characters are
+# not whitespace to `is_merge_command`'s `\s+` regex, so pre-#973 this
+# evaded the fallback detector entirely and the merge sailed through
+# ungated. `run_case_custom_cmd` builds the test payload with the REAL
+# system jq (`jq -nc --arg c "$cmd" ...`, called before the sandboxed
+# broken-jq stub is on PATH), so a literal tab placed in $cmd here is
+# correctly JSON-escaped to `\t` in the payload — exactly the shape the
+# broken-jq fallback then has to recognise without jq's help.
+sb=$(make_sandbox_broken_jq)
+tab_cmd=$'gh\tpr\tmerge 305 --repo me2resh/apexyard --squash'
+run_case_custom_cmd "#973: jq broken, JSON-escaped-tab merge command -> BLOCKS (fail closed)" 2 \
+  "cannot evaluate this command" "$sb" \
+  "$tab_cmd"
+
+# 18. jq broken + a clearly non-merge command whose words ALSO happen to
+#     be tab-separated (so it exercises the same JSON-escape-normalize
+#     code path) → must still stay a no-op. Proves the #973 fix doesn't
+#     turn every tab-containing payload into a false-positive block —
+#     only ones that are merge-shaped once the escapes are decoded.
+sb=$(make_sandbox_broken_jq)
+tab_nonmerge_cmd=$'echo\tnot\ta\tmerge\tcommand\tat\tall'
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c \
+  "echo '$(jq -nc --arg c "$tab_nonmerge_cmd" '{tool_name:"Bash", tool_input:{command:$c}}')' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
+  echo "PASS [#973: jq broken, JSON-escaped-tab NON-merge command -> stays a no-op]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#973: jq broken, JSON-escaped-tab NON-merge command -> stays a no-op]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}jq-broken-tab-nonmerge-noop "
+fi
+
+# --- #1091: forge HEAD unresolvable -> the gate must FAIL CLOSED -------
+#
+# The gate's integrity property is that marker SHAs are compared against the
+# FORGE-reported PR HEAD — state an agent cannot author. Before #1091 the hook
+# fell back to `git rev-parse HEAD` (a local, agent-controlled value) when the
+# gh call failed, with only a warning. That degraded the one adversarially
+# sound boundary into a local read.
+#
+# DISCRIMINATING BY CONSTRUCTION: the local HEAD and the markers are made to
+# AGREE. Under the old fallback the comparison therefore SUCCEEDS and the merge
+# is ALLOWED (rc=0). Under fail-closed it is BLOCKED (rc=2). A test using a
+# mismatching local HEAD would block both before and after, proving nothing.
+
+make_sandbox_gh_fails() {
+  local sb
+  sb=$(make_sandbox)
+  # gh cannot resolve the HEAD: transient network, expired token, rate limit,
+  # and gh-not-installed all surface identically as a failed/empty result.
+  # headRefName + headRepository still answer, so exactly ONE thing fails.
+  cat > "$sb/bin/gh" <<'GHEOF'
+#!/bin/bash
+case "$*" in
+  *"pr view"*"headRefOid"*)     exit 1 ;;
+  *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
+  *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
+  *) ;;
+esac
+exit 0
+GHEOF
+  chmod +x "$sb/bin/gh"
+  echo "$sb"
+}
+
+sb=$(make_sandbox_gh_fails)
+# The sandbox's local HEAD — the value the OLD fallback would have used.
+local_head=$(cd "$sb" && git rev-parse HEAD 2>/dev/null)
+# Markers written to MATCH that local HEAD: the setup most favourable to a
+# bypass, where every comparison passes under the old code.
+write_rex_marker "$sb" 99 "$local_head"
+write_ceo_marker_structured "$sb" 99 "$local_head"
+input=$(jq -nc --arg c "gh pr merge 99 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c \
+  "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "2" ] && echo "$got_stderr" | grep -qi "resolve"; then
+  echo "PASS [#1091: forge HEAD unresolvable + markers matching LOCAL head -> BLOCKED]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#1091: forge HEAD unresolvable + markers matching LOCAL head -> BLOCKED]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}1091-fail-closed "
+fi
+
+# Control: gh healthy -> behaviour unchanged, markers at the forge HEAD pass.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 99
+write_ceo_marker_structured "$sb" 99
+input=$(jq -nc --arg c "gh pr merge 99 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c \
+  "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ]; then
+  echo "PASS [#1091 control: gh healthy, markers at forge HEAD -> still ALLOWED]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#1091 control: gh healthy, markers at forge HEAD -> still ALLOWED]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}1091-control-healthy "
 fi
 
 # --- Summary ----------------------------------------------------------

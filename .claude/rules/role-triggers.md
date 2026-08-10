@@ -17,11 +17,11 @@ ApexYard ships **20 role definitions** in `roles/{department}/`. They are not al
 | **Head of Product** | `roles/product/head-of-product.md` | Roadmap prioritization · feasibility call · strategic product decision · resource allocation across products |
 | **Product Manager** | `roles/product/product-manager.md` | PRD creation · user-story breakdown · acceptance-criteria authoring · sprint planning |
 | **Product Analyst** | `roles/product/product-analyst.md` | Market research · competitive analysis · metric investigation · data-driven product call |
-| **Head of Design** | `roles/design/head-of-design.md` | Design-system changes · UX principles decision · cross-project visual standards |
+| **Head of Design** | `roles/design/head-of-design.md` | Design-system changes · UX principles decision · cross-project visual standards · escalation from a UI Designer (design gate) |
 | **UI Designer** | `roles/design/ui-designer.md` | Visual design · component specifications · design tokens · pixel-level work |
 | **UX Designer** | `roles/design/ux-designer.md` | User flows · information architecture · usability review · wireframing |
-| **Head of Security** | `roles/security/head-of-security.md` | Security strategy · threat model · compliance call · cross-project security architecture |
-| **Security Auditor** | `roles/security/security-auditor.md` | **PR touches auth / crypto / user data / secrets** · SAST findings · OWASP review · dependency vulnerability |
+| **Head of Security** | `roles/security/head-of-security.md` | Security strategy · threat model · compliance call · cross-project security architecture · escalation from a Security Auditor (strategy / compliance / repeated-pattern concern) |
+| **Security Auditor** | `roles/security/security-auditor.md` | **PR touches auth / crypto / user data / secrets** · **the security-critical trust chain (`.claude/hooks/**`, `.claude/settings.json`) — #777** · SAST findings · OWASP review · dependency vulnerability |
 | **Penetration Tester** | `roles/security/penetration-tester.md` | Active testing · exploit discovery · API security review · pre-release security sign-off |
 | **Head of Data** | `roles/data/head-of-data.md` | Analytics strategy · data governance · reporting architecture · cross-project data modelling |
 | **Data Analyst** | `roles/data/data-analyst.md` | SQL queries · dashboards · A/B-test analysis · metric investigation |
@@ -46,6 +46,10 @@ Head of Product → Product Manager → Head of Design / UX Designer / UI Design
 ```
 
 Each handoff is explicit. The handing-off role delivers the artefact defined in its role file (PRD, tech design, PR, test plan, etc.); the receiving role reads it and moves forward.
+
+### On inbound escalation
+
+When a Head-class role is activated by an escalation named in the Activation Table — Tech Lead → Head of Engineering, UI Designer → Head of Design, Security Auditor → Head of Security — it acknowledges the escalation in its activation marker (naming the escalating role and the reason). It then makes the call within its CAN scope, or escalates further if the decision exceeds that scope, and hands the decision back to the escalating role so work resumes where it paused. Each Head's own role file defines the receiving-side specifics — what it decides, what it escalates onward, and the artefact it returns.
 
 ### How to signal activation
 
@@ -81,6 +85,7 @@ This is a **prose convention**, not a mechanically-enforced format. The sibling 
 |--------|----------|
 | Ticket moved to `qa` label | QA Engineer |
 | PR diff touches `**/auth/**`, `**/crypto/**`, `**/secrets/**`, `.env*` | Security Auditor |
+| Edit/PR touches the trust chain — `.claude/hooks/**` (merge gates, tracker/forge lib, review-marker lib, credential-broker scripts) or `.claude/settings.json` (the matcher wiring that decides whether a gate fires) | Security Auditor (#777) |
 | PR diff touches `.github/workflows/**`, `golden-paths/pipelines/**` | Platform Engineer |
 | PR diff touches `docs/agdr/**` or adds a new dependency | Tech Lead |
 | Edit/PR touches a design artifact (technical design, migration AgDR, feature spec / PRD) | Solution Architect |
@@ -124,11 +129,20 @@ Roles deliver concrete artefacts at each handoff point. These are the contracts 
 | Head of Design → UX/UI Designer | Design system tokens + principles |
 | UX Designer → UI Designer | User flows + wireframes |
 | UI Designer → Frontend Engineer | Component specs + design tokens |
+| UI Designer → Head of Design | Escalated design call (design-system change · cross-product visual standard · design disagreement · no UI Designer available) |
 | Tech Lead → Backend / Frontend Engineer | Technical design + task breakdown |
 | Backend / Frontend Engineer → QA Engineer | Testable build + PR |
-| Security Auditor → Tech Lead | Security findings + required fixes |
+| Security Auditor → Tech Lead | Security findings + required fixes (remediation is engineering work) |
+| Security Auditor → Head of Security | Strategy / compliance / cross-project escalation + repeated-pattern concern |
 | QA Engineer → Product Manager | AC verification sign-off |
 | Platform Engineer → SRE | Production deployment + runbook |
+
+### Two authority splits worth calling out
+
+Two of the rows above encode a **practitioner-reviews / head-escalates** split — the same shape as code review (Rex → Head of Engineering) and design-artifact review (Tariq → Head of Engineering):
+
+- **UI design gate.** The **UI Designer (Nour)** owns the routine per-PR design gate: she reviews the implementation diff, and her approval is recorded through the design-approval flow (`/approve-design`, gated by `require-design-review-for-ui.sh`). The **Head of Design (Maha)** is the escalation path, not the default reviewer — a design-system change, a cross-product visual standard, a disagreement on a design call, or no UI Designer available. Making the Head the routine reviewer would bottleneck every UI PR on the org's most senior designer; recorded as AgDR-0106.
+- **Security escalation.** A **Security Auditor's findings + required fixes go to the Tech Lead** — remediation is engineering work. **Strategy, compliance, cross-project concerns, and repeated-pattern signals escalate to the Head of Security (Faisal)** instead. Both legs are real and non-overlapping: the Tech Lead fixes the diff, the Head of Security owns the posture.
 
 ## Aspirational → Real
 
@@ -159,6 +173,7 @@ Triggers wired in v1 (me2resh/apexyard#206):
 |----------------|------------|-----------|------|
 | Label-based  | `PreToolUse` on `Bash` (matcher: `gh issue edit *`) | `--add-label qa` (single or comma list) | QA Engineer |
 | Diff/path    | `PreToolUse` on `Edit` / `Write` / `MultiEdit` | path contains `auth/`, `crypto/`, `secrets/`, `.env*` | Security Auditor |
+| Diff/path    | same | path under `.claude/hooks/` or matches `.claude/settings.json` (the trust chain — #777) | Security Auditor |
 | Diff/path    | same | path under `.github/workflows/` or `golden-paths/pipelines/` | Platform Engineer |
 | Diff/path    | same | path under `docs/agdr/` | Tech Lead |
 | Diff/path    | same | path matches a design artifact (`*technical-design*.md`, `*tech-design*.md`, `**/designs/**`, `**/prds/**`, `*prd*.md`, `*feature-spec*.md`, `docs/agdr/*migration*.md`) | Solution Architect |
@@ -169,6 +184,19 @@ A migration AgDR fires **both** the Tech Lead trigger (`docs/agdr/**`, author) a
 Triggers from the table above that are **not** yet mechanically detected (e.g. "production incident mentioned" → SRE, "new PRD drafted" → Product Manager) still rely on self-discipline; the hook can be extended without changing the surrounding wiring.
 
 Tests live at `.claude/hooks/tests/test_detect_role_trigger.sh` and cover the three trigger families the acceptance criteria call out.
+
+---
+
+### The Contrarian (utility agent — premise-level adversary)
+
+Naqid (The Contrarian) is a **utility agent**, not a department role — like Rex (`code-reviewer`) and Tariq (`solution-architect`), it isn't tied to an SDLC phase and has no department file under `roles/`. It challenges the **premise** of an idea/feature/spec/decision/plan, and is **advisory-only** (no marker, no gate). It does **not** auto-fire on diffs — challenging a premise is a human-initiated act, so **prompted activation** is the primary path. The phrases below are mechanically detected by `detect-role-trigger.sh` (which emits an advisory banner suggesting `/challenge`).
+
+| Signal | Activate |
+|--------|----------|
+| `/challenge <target>` | The Contrarian (Naqid) |
+| "play devil's advocate on …" / "challenge this" / "poke holes in …" / "what's the case against …" / "steelman then attack …" | The Contrarian (Naqid) |
+
+**Optional advisory offer (never forced).** At high-stakes moments — a new AgDR via `/decide`, a new PRD via `/write-spec`, or plan-mode exit on a large call — you MAY surface a one-line nudge offering to run `/challenge` first. The operator opts in; never auto-run it, and never let its verdict block work (it informs, it doesn't veto). See `.claude/agents/contrarian.md`, `.claude/skills/challenge/SKILL.md`, and AgDR-0078.
 
 ---
 

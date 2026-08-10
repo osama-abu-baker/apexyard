@@ -1,4 +1,10 @@
 #!/bin/bash
+# CLASS: CONTROL (AgDR-0104 labelling, AgDR-0109). This hook decides on
+# STRUCTURED STATE, not on the text of a command: the PR's real diff from the forge, plus a marker file's SHA.
+# That is what makes it trustworthy where a text-matching backstop like
+# warn-review-marker-write.sh is not. Keep it fail-closed: if it cannot
+# evaluate its precondition it must block, never allow (AgDR-0104).
+#
 # PreToolUse hook on `gh pr merge` AND `gh api .../pulls/<N>/merge`: when the
 # PR's diff touches UI files, require a design approval marker at
 # .claude/session/reviews/<pr>-design.approved (with a matching HEAD SHA) before
@@ -29,48 +35,134 @@
 # carve out a specific dir (e.g. `^docs/examples/`, `^wiki/artifacts/`) where
 # `.jsx`/`.tsx` files are documentation samples rather than real UI.
 #
-# How the marker gets written: the design-reviewer records approval by
-# writing the marker file. There is no /approve-design skill yet — the
-# design reviewer writes the file manually or via a (future) skill.
+# How the marker gets written: a HUMAN runs the `/approve-design <pr>` skill,
+# which writes the repo-qualified marker via `review_marker_path` (AgDR-0060).
+# Since #1042 that skill is `disable-model-invocation: true`, so the model
+# cannot invoke it — and unlike the architecture gate (where the spawned
+# solution-architect sub-agent writes its own marker), NO agent writes
+# `*-design.approved`. A human records this one, always.
+#
+# This comment previously said "there is no /approve-design skill yet" and the
+# unblock message below told the reader to hand-write the marker with a raw
+# redirect. Both were stale and, after #1042, actively harmful: the hand-write
+# became the ONLY path the message offered, on a marker type
+# `warn-review-marker-write.sh` does not guard.
 #
 # Trust model: same as other markers. Local session state, gitignored,
 # converts invisible inference ("ah, the UI change looked fine") into
 # visible file existence. For adversarial trust, use CODEOWNERS.
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
-
-if [ -z "$COMMAND" ]; then
-  exit 0
-fi
 
 # Shared merge-shape detector + PR-number parser (see _lib-extract-pr.sh).
 # Handles `gh pr merge <N>` and `gh api repos/<owner>/<repo>/pulls/<N>/merge`.
+# Sourced BEFORE the jq-based command parse below (moved up from its
+# original position after the parse) so is_merge_command is available as
+# the jq-independent fallback detector when the parse can't be trusted —
+# see #965.
 . "$(dirname "$0")/_lib-extract-pr.sh"
 # Repo-qualified marker path helper (#485).
 . "$(dirname "$0")/_lib-review-markers.sh"
+# cd-target → origin recovery for the no---repo split-portfolio merge (#687).
+. "$(dirname "$0")/_lib-pr-repo.sh"
+
+# Parse .tool_input.command via jq. #965: this used to be the ONLY parse
+# path, and an empty/failed result — jq missing from PATH, or jq erroring
+# on unexpected input — fell straight through to `exit 0`, silently
+# ALLOWING the merge command through with NO design-review check at all.
+# A gate must fail CLOSED when it can't evaluate its own precondition,
+# not fail open.
+#
+# But this hook's PreToolUse matcher is `Bash` (every Bash call this
+# session runs, not just merges — see .claude/settings.json), so the fix
+# can't be "exit 2 whenever jq is unavailable": that would block every
+# unrelated Bash command for the rest of the session the moment jq broke,
+# which is worse than the bug it replaces. The resolution below keeps the
+# jq-unparseable case a no-op EXCEPT when the raw payload text itself
+# looks merge-shaped — in that narrower case we cannot safely let the
+# command through, so we fail closed instead.
+COMMAND=""
+if command -v jq >/dev/null 2>&1; then
+  COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+fi
+
+if [ -z "$COMMAND" ]; then
+  # jq is missing, OR jq is present but the parse produced nothing — a
+  # genuinely empty command (legitimate no-op) or jq choking on
+  # malformed/unexpected JSON. Those two cases are indistinguishable from
+  # a parsed field alone, so fall back to a parser-independent scan: reuse
+  # is_merge_command (plain grep/sed, no jq dependency) directly against
+  # the RAW JSON payload text instead of the parsed command. The command
+  # text's own words (`gh`, `pr`, `merge`, digits, spaces) survive JSON
+  # string-encoding unchanged, so this is the exact same tested
+  # merge-shape detector used below — not a second, drift-prone regex.
+  #
+  # #973: the command's SEPARATORS do not always survive unchanged — a
+  # literal tab (or other JSON-escaped whitespace) encodes as a
+  # multi-character escape sequence (`\t`, `\uXXXX`) that `is_merge_command`'s
+  # `\s+` regex class won't recognise as whitespace. Normalize the small set
+  # of escapes that matter BEFORE scanning, so a merge command with
+  # JSON-escaped separators is caught exactly like a space-separated one —
+  # see `_normalize_json_escapes` in _lib-extract-pr.sh for the decode and
+  # why it's only ever applied on this raw-payload path, never on COMMAND.
+  #
+  # A payload that isn't merge-shaped at all is a genuine no-op — exit 0,
+  # unchanged behaviour for the overwhelming majority of Bash calls this
+  # hook sees. A payload that DOES look merge-shaped but that we can't
+  # safely parse/verify fails CLOSED (exit 2) instead of silently letting
+  # an unreviewed UI change through.
+  if is_merge_command "$(_normalize_json_escapes "$INPUT")"; then
+    echo "BLOCKED: design-review gate cannot evaluate this command — jq is unavailable or .tool_input.command could not be parsed, but the raw input looks merge-related. Refusing to merge until this can be verified. Restore jq (see .claude/hooks/check-jq-installed.sh) and retry." >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 if ! is_merge_command "$COMMAND"; then
   exit 0
 fi
 
-# Parse --repo (for `gh pr merge --repo owner/repo`). Fallback: recover from
-# the `gh api .../pulls/<N>/merge` URL path so downstream `gh pr diff` calls
-# still know which repo to talk to.
+# Resolve the PR's repo. Each step runs only if the prior left CMD_REPO empty:
+#   1. --repo flag      (`gh pr merge --repo owner/repo`)
+#   2. gh api URL path  (`gh api repos/<owner>/<repo>/pulls/<N>/merge`)
+#   3. cd-target origin (`cd <portfolio> && gh pr merge <N>` with NO --repo —
+#                        the split-portfolio v2 pattern; the hook fires BEFORE
+#                        the in-command `cd`, so its own cwd is the ops fork,
+#                        not the PR's repo. me2resh/apexyard#687, the merge-time
+#                        sibling of the create-time fix #669.)
+#   4. extract_repo_from_command fallback (current-branch `gh pr view`)
 CMD_REPO=$(echo "$COMMAND" | sed -nE 's/.*--repo[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
 if [ -z "$CMD_REPO" ]; then
   CMD_REPO=$(echo "$COMMAND" | grep -oE 'repos/[^/[:space:]]+/[^/[:space:]]+/pulls/[0-9]+/merge' | sed -nE 's|repos/([^/]+/[^/]+)/pulls/.*|\1|p' | head -1)
 fi
-REPO_FLAG=""
-if [ -n "$CMD_REPO" ]; then
-  REPO_FLAG="--repo $CMD_REPO"
+if [ -z "$CMD_REPO" ]; then
+  # Recover the repo from a leading `cd <path> &&` prefix — only when the path
+  # resolves to a real git tree (relative paths resolve against the hook's cwd,
+  # which is correct: the hook runs pre-`cd`). Otherwise fall through.
+  CD_TARGET=$(pr_cmd_cd_target "$COMMAND")
+  if [ -n "$CD_TARGET" ] && git -C "$CD_TARGET" rev-parse --git-dir >/dev/null 2>&1; then
+    CMD_REPO=$(git_origin_repo "$CD_TARGET")
+  fi
 fi
 
 PR_NUMBER=$(extract_pr_number "$COMMAND")
 # Resolve the repo for qualified marker paths (#485).
-# CMD_REPO already parsed above; fall back via helper if blank.
+# CMD_REPO already resolved above; fall back via helper if still blank.
+# NOTE (#765): the design marker is keyed on the BASE repo. CMD_REPO is the base via
+# --repo / API-path / cd-target origin; the extract_repo_from_command fallback below resolves
+# headRepository (the FORK) on a no---repo current-branch merge — a residual edge affecting
+# unsanctioned merges only (/design-review + /approve-design thread the base repo). Left as-is.
 if [ -z "$CMD_REPO" ]; then
   CMD_REPO=$(extract_repo_from_command "$COMMAND")
+fi
+
+# Derive REPO_FLAG from the FULLY-resolved CMD_REPO (#687) so the `gh pr diff`
+# below targets the PR's real repo. If this were set before the cd-target /
+# fallback steps, the no---repo split-portfolio case would diff the ops fork,
+# find no UI files, and silently bypass the gate.
+REPO_FLAG=""
+if [ -n "$CMD_REPO" ]; then
+  REPO_FLAG="--repo $CMD_REPO"
 fi
 
 if [ -z "$PR_NUMBER" ]; then
@@ -173,11 +265,20 @@ The expected approval file does not exist:
 
 To unblock:
 
-  1. Invoke the UI Designer role (or a human designer) to review the UI changes
-  2. When the designer approves, record it with the current HEAD SHA:
-       mkdir -p .claude/session/reviews
-       git rev-parse HEAD > .claude/session/reviews/${PR_NUMBER}-design.approved
-  3. Retry the merge
+  1. Review the UI changes against the design system — adopt the UI Designer
+     role (Nour), or ask a human designer to look at the PR diff
+  2. Report the verdict plainly. Do NOT write the marker yourself: since
+     #1042 recording a design approval is a human action, and no agent
+     writes this marker type
+  3. Ask the designer or operator to run:
+       /approve-design ${PR_NUMBER}
+     That skill writes the repo-qualified marker against the PR's HEAD on
+     GitHub, which is what this gate compares
+  4. They retry the merge
+
+  Do not hand-write this file. A raw redirect produces the wrong path (the
+  marker is repo-qualified, see AgDR-0060) and usually the wrong SHA (the
+  gate reads the PR's HEAD from the forge, not your local HEAD — #55).
 
 To customize which file patterns count as "UI":
 
@@ -197,14 +298,36 @@ MSG
   exit 2
 fi
 
-# SHA consistency check — resolve the PR's real HEAD via GitHub rather than
-# local HEAD (see #55). Falls back to local HEAD with a warning if the
-# gh call fails (network, auth).
+# SHA consistency check — resolve the PR's real HEAD via the forge rather than
+# local HEAD (see #55). If that resolution fails we BLOCK rather than fall back
+# to the local HEAD (#1091) — a local value is agent-controlled, so falling
+# back would silently void the check.
 APPROVED_SHA=$(tr -d '[:space:]' < "$APPROVAL")
 CURRENT_SHA=$(resolve_pr_head "$PR_NUMBER" "$CMD_REPO")
 if [ -z "$CURRENT_SHA" ]; then
-  echo "WARN: Could not resolve PR #${PR_NUMBER} HEAD via gh — falling back to local HEAD. If this merge fails, run 'gh pr checkout ${PR_NUMBER}' first or re-authenticate gh." >&2
-  CURRENT_SHA=$(git rev-parse HEAD 2>/dev/null)
+  cat >&2 <<MSG
+BLOCKED: could not resolve PR #${PR_NUMBER}'s HEAD from the forge.
+
+This gate compares the recorded approval SHA against the PR's HEAD **as the
+forge reports it** — state that a local file write cannot fabricate. That
+comparison IS the property the gate exists to provide.
+
+Until me2resh/apexyard#1091 this fell back to the LOCAL HEAD
+(\`git rev-parse HEAD\`) with only a warning. That substituted an
+agent-controlled value for the one value in this system an agent cannot
+author, so on any forge hiccup the gate silently stopped meaning anything.
+A gate that cannot evaluate its precondition must BLOCK, not guess — the same
+principle already applied to the jq-unavailable path in #965 (AgDR-0104).
+
+Likely causes: expired or absent forge token, network failure, API rate
+limit, or the forge CLI not installed.
+
+To unblock:
+  1. Check auth — \`gh auth status\` (or \`glab auth status\`), re-login if needed
+  2. Confirm connectivity to the forge
+  3. Retry the merge — no approval needs re-recording; the markers are still valid
+MSG
+  exit 2
 fi
 if [ -n "$APPROVED_SHA" ] && [ -n "$CURRENT_SHA" ] && [ "$APPROVED_SHA" != "$CURRENT_SHA" ]; then
   cat >&2 <<MSG

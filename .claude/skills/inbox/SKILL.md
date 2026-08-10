@@ -15,10 +15,23 @@ Read the registry path via `portfolio_registry`, the per-project docs dir via `p
 ```bash
 source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-read-config.sh"
 source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-portfolio-paths.sh"
+source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-tracker.sh"
 registry=$(portfolio_registry)
 ```
 
 Defaults match today's single-fork layout (`./apexyard.projects.yaml`, `./projects`, `./projects/ideas-backlog.md`). Adopters in split-portfolio mode override the `portfolio.{registry, projects_dir, ideas_backlog}` keys in `.claude/project-config.json`. Don't hardcode literal `apexyard.projects.yaml` or `projects/` paths in bash blocks — the helper resolves whichever mode the adopter is in. See `docs/multi-project.md`.
+
+## Tracker-agnostic issue listing (#710 / AgDR-0093)
+
+The **issue** sections below (assigned to you, your issues with new comments, blocked items) call `tracker_list` from `_lib-tracker.sh` instead of hardcoding `gh issue list`, so they work on a project whose `tracker.kind` is `glab` (GitLab) too. Pass the project's `repo:` (from the registry) as the first argument — the tracker is resolved per-project — plus generic filters:
+
+```bash
+# tracker_list <owner/repo> [state=…] [assignee=@me|none|<user>] [author=…] [labels=csv] [search=…] [since=ISO] [limit=N]
+# → emits a JSON array: [{ref,number,state,title,url,labels,updatedAt}, …]  ([] on empty/unavailable)
+tracker_list "$repo" state=open assignee=@me limit=50 2>/dev/null
+```
+
+> **Scope caveat (forge axis, #711).** The **PR** sections still call `gh pr list` directly. The PR/MR forge abstraction is a separate ticket (#711); until it lands, `/inbox`'s PR sections are GitHub-only. `/inbox` is therefore *issue-axis* tracker-agnostic, not fully tracker-agnostic. Filters GitHub expresses but GitLab can't (`mentions:`, `commenter:`) stay on a gh-only path, documented at the section that uses them.
 
 ## Usage
 
@@ -37,6 +50,8 @@ Defaults match today's single-fork layout (`./apexyard.projects.yaml`, `./projec
 The inbox is grouped by section. Empty sections are omitted.
 
 ### 1. PRs awaiting your review
+
+> Forge axis (#711) — GitHub-only until the PR/MR abstraction lands.
 
 ```bash
 gh pr list \
@@ -69,30 +84,38 @@ Filter to ones where `mergeStateStatus` is `CLEAN` — those are ready to merge 
 
 ### 4. Issues assigned to you
 
+Issue axis — tracker-agnostic via `tracker_list` (run per `repo:` from the registry):
+
 ```bash
-gh issue list \
-  --search "is:open is:issue assignee:@me" \
-  --json number,title,url,labels,updatedAt
+tracker_list "$repo" state=open assignee=@me limit=50
+# → [{ref,number,state,title,url,labels,updatedAt}, …]
 ```
 
 ### 5. Issues you opened that have new comments since you last looked
 
-```bash
-gh issue list \
-  --search "is:open is:issue author:@me commenter:>@me" \
-  --json number,title,url,comments,updatedAt
-```
+The "new comments since last looked" part is a GitHub-only search qualifier (`commenter:>@me`) with no GitLab equivalent, so `tracker_list` fetches your open-authored issues and the comment recency is filtered **client-side** (the established degradation for no-equivalent filters):
 
-(GitHub's search syntax doesn't perfectly express "new comments since you last looked", so use `updatedAt` and filter client-side against a stored "last seen" timestamp if available, otherwise show everything from the last 7 days.)
+```bash
+tracker_list "$repo" state=open author=@me
+# Then filter client-side on `updatedAt` against a stored "last seen" timestamp
+# if available, otherwise show everything from the last 7 days.
+```
 
 ### 6. Mentions in comments
 
+`mentions:@me` is a cross-repo GitHub-search capability (a *different operation* than a repo-scoped list) with no GitLab CLI equivalent, so this section stays on a **gh-only path** — it returns nothing on non-GitHub trackers, and `--no-mentions` hides it entirely:
+
 ```bash
-gh search issues "mentions:@me is:open" \
-  --json number,title,url,repository,updatedAt
+# gh-only (degrades to empty on glab / other trackers):
+if [ "$(tracker_kind "$repo")" = "gh" ]; then
+  gh search issues "mentions:@me is:open" \
+    --json number,title,url,repository,updatedAt
+fi
 ```
 
 ### 7. PRs failing CI on a branch you authored
+
+> Forge axis (#711) — GitHub-only until the PR/MR abstraction lands.
 
 ```bash
 gh pr list \
@@ -104,12 +127,39 @@ Filter client-side to those where any check is `FAILURE`.
 
 ### 8. Blocking labels across managed projects
 
+Issue axis — tracker-agnostic via `tracker_list` (run per project from the registry):
+
 ```bash
-gh issue list --label blocked --state open \
-  --json number,title,url,labels
+tracker_list "$repo" state=open labels=blocked
 ```
 
-(Run per project from the registry.)
+### 9. Reconcile — open issues that already have a merged PR (#923)
+
+> Forge axis (#711) — GitHub-only until the PR/MR abstraction lands.
+
+The sibling of the reconcile-before-build rule: that rule stops NEW drift at the spawn boundary; this section surfaces EXISTING drift that already happened. The signature is cheap and mechanical — an issue that is still `OPEN` but a merged PR already references it (`Closes #N` that didn't fire because the PR merged to `dev`, not the release branch; or `Refs #N` left open on purpose for a QA gate).
+
+Fetch **once per repo**, not once per open issue — a batched query is the whole point, both for `gh` rate limits and for wall-clock time across a portfolio:
+
+```bash
+# 1. Open issue numbers for this repo (one call).
+open_issues=$(gh issue list --repo "$repo" --state open --json number --jq '.[].number')
+
+# 2. Merged PRs for this repo, bounded so the scan stays cheap (one call).
+#    --limit 200 is a reasonable default; tighten it further with --search
+#    "merged:>=<since-date>" on a very active repo, or when --since is passed.
+gh pr list --repo "$repo" --state merged \
+  --json number,title,body,url,mergedAt --limit 200
+```
+
+Then, for each merged PR's title + body, extract issue references and classify them:
+
+- **Closing keywords** — `close[sd]?`, `fix(e[sd])?`, `resolve[sd]?` immediately followed by `#N` (case-insensitive). A match here against an issue still open is very likely a **release-cut artifact** — the PR's `Closes #N` didn't auto-fire because it merged to a non-default branch.
+- **Referencing keywords** — `refs?`, `references?`, `related to` immediately followed by `#N`. A match here is likely an **intentional QA gate** — the ticket is deliberately held open pending verification (see `workflows/sdlc.md` Phase 5) — surface it as lower-urgency than a closing-keyword match.
+
+**Conservative by construction**: only count a reference when a closing/referencing keyword sits directly next to the `#N` (not any bare number appearing anywhere in a PR body) AND `N` is in the `open_issues` set fetched in step 1. A PR that happens to mention an unrelated number, or a `#N` for an issue that's already closed, produces no flag. This is what keeps the section from ever flagging a genuinely-open or gated ticket.
+
+**Graceful degradation**: if either `gh` call fails for a repo (rate limit, auth, network), skip that repo's contribution to this section and continue — same as Rule 5 below. If a repo produces zero matches, the section is simply absent for it (Rule 4).
 
 ## Output format
 
@@ -145,7 +195,11 @@ INBOX — 2026-04-06 09:14
 🛑 Blocked items (1)
   · billing-api#19   Waiting on API key from vendor     https://…
 
-Summary: 12 items · 3 PRs to review · 1 ready to merge · 1 blocking CI failure
+🔁 Reconcile — open issues with a merged PR (2)
+  · example-app#88   Closes-but-open · merged PR #101 (release-cut?)   https://…
+  · billing-api#31   Refs-open · merged PR #64 (QA gate?)              https://…
+
+Summary: 12 items · 3 PRs to review · 1 ready to merge · 1 blocking CI failure · 2 to reconcile
 ```
 
 If everything is empty:
@@ -162,6 +216,7 @@ If everything is empty:
 | `--since <duration>` | Only items updated in the window (e.g. `24h`, `7d`) |
 | `--project <name>` | Limit to one project from the registry |
 | `--no-mentions` | Hide the mentions section |
+| `--no-reconcile` | Hide the Reconcile section (#923) |
 
 ## Rules
 
@@ -172,6 +227,7 @@ If everything is empty:
 5. **Never error on a single project** — if one repo is unreachable, mark it `?` and continue
 6. **Always include URLs** — every row needs a clickable link
 7. **No noise** — items where you have no possible action shouldn't appear (e.g. PRs you've already approved)
+8. **Reconcile is a passive surface, not an action** — flag drift, never close/re-tag the issue or comment on the PR from this skill; the operator decides what to do with each flagged item
 
 ## Related skills
 

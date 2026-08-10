@@ -12,6 +12,42 @@ This audit is the **single view** of the governance surface ApexYard ships with.
 
 ---
 
+## Trust-chain hooks: control vs backstop
+
+The hooks that gate merges and approval markers are **not all the same kind of thing**, and reading
+them as if they were is how the framework spent four rounds patching one file. Per
+[AgDR-0104](agdr/AgDR-0104-trust-chain-controls-vs-backstops.md), every trust-chain hook is labelled
+in its own header as one of two classes:
+
+| Class | Decides on | Expectation | Examples |
+|-------|-----------|-------------|----------|
+| **Control** | **Structured state** — a file's contents, a SHA or CI conclusion reported by the forge | **Fail-closed**: if it cannot evaluate its precondition, it must block, never allow | `block-unreviewed-merge.sh`, `block-merge-on-red-ci.sh`, `require-design-review-for-ui.sh`, `require-architecture-review.sh` |
+| **Backstop** | **The text of a command** — inherently ambiguous | Advisory. Warns, never blocks. The one known evasion (split path, #1026) is a documented limit, not an open bug | `warn-review-marker-write.sh` |
+
+**The guidance, in one line:** a trust-chain hook that reads command text is a *backstop* to a
+server-side gate and should warn; only a hook reading structured state is a *control* and should
+fail closed.
+
+Why the split is load-bearing: AgDR-0104 established that "a security gate implemented as
+regex/substring matching over bash command *text* cannot be made sound — the ways to express a path
+(`$VAR`, `$(…)`, concat, here-doc, symlink, `printf`) are unbounded." A backstop tuned to block
+therefore fails in *both* directions at once — it misses real writes spelled unusually, and it
+blocks ordinary commands that merely *mention* a marker (a grep pattern, a commit message, a code
+review, a JSON payload). [AgDR-0109](agdr/AgDR-0109-marker-write-gate-is-a-backstop.md) records the
+evidence and applies the backstop label; [AgDR-0111](agdr/AgDR-0111-marker-gate-plain-advisory.md)
+is the record that owns the return to plain advisory (0109 had chosen a narrower
+block-on-resolved-target design, superseded).
+
+Real merge integrity does not rest on the backstop. It rests on the per-PR human approval plus the
+controls' comparison of marker SHAs against forge-reported HEAD — and, for adopters who want a gate
+no local process can reach at all, on the forge's own server-side protection (GitHub branch
+protection; GitLab protected branches + MR approval rules).
+
+**If you are about to add a pattern to a backstop so it catches one more spelling — don't.** That is
+the loop this section exists to stop.
+
+---
+
 ## Audit table
 
 Columns:
@@ -82,7 +118,7 @@ Columns:
 
 | rule | source | enforced by | mechanizable? | proposed hook / reason advisory |
 |------|--------|-------------|---------------|---------------------------------|
-| HARD STOP — run `/decide` before any technical decision | `.claude/rules/agdr-decisions.md § Trigger Patterns` | prose (self-discipline) | no | trigger patterns are chat-output phrases; linting assistant prose was rejected for the same reason as in `ticket-vocabulary.md` [^self-discipline] |
+| HARD STOP — run `/decide` before a **material** technical decision (architectural, hard to reverse, or cross-cutting) | `.claude/rules/agdr-decisions.md § The threshold` | prose (self-discipline) | no | the threshold is a judgment about blast radius, not a lintable chat-output phrase; linting assistant prose was rejected for the same reason as in `ticket-vocabulary.md` [^self-discipline]. Narrowed from "any technical decision" in [#997][997] — the blanket form manufactured the AgDR→Tech-Lead→Solution-Architect handover churn fixed in [#995][995] |
 | AgDR required for architecture / infra commits | `.claude/rules/agdr-decisions.md § Enforcement` | `require-agdr-for-arch-changes.sh` | yes | mechanized (AgDR-0001); narrow default path list, project-config override via `.architecture_paths` |
 | AgDR required at PR time when diff touches architecture paths OR adds a new dependency | `.claude/rules/agdr-decisions.md § Enforcement` | `require-agdr-for-arch-pr.sh` | yes | mechanized ([#112][112]); fires on `gh pr create`, config via `.agdr_trigger_paths[]` + `.agdr_trigger_dep_files[]`; skip marker `<!-- agdr: not-applicable -->` bypasses with a visible warning |
 | Extend default `architecture_paths` to cover SAM / Helm / K8s / Serverless Framework | — | — | deferred | [#25][25] — default list is deliberately narrow; follow-up broadens safely |
@@ -202,3 +238,5 @@ The spread confirms what AgDR-0001 set out to make true: the **high-blast-radius
 [107]: https://github.com/me2resh/apexyard/issues/107
 [110]: https://github.com/me2resh/apexyard/issues/110
 [112]: https://github.com/me2resh/apexyard/issues/112
+[995]: https://github.com/me2resh/apexyard/issues/995
+[997]: https://github.com/me2resh/apexyard/issues/997

@@ -2,14 +2,25 @@ version: 2
 updates:
   # The framework has no package manifests (no package.json / requirements.txt /
   # go.mod) — its only declared dependency surface is the GitHub Actions pinned
-  # in .github/workflows/**. Keep those patched. If a manifest is added later
-  # (e.g. a build tool under site/), add its ecosystem here. #518.
+  # in .github/workflows/**. Keep those patched. If a manifest is added later,
+  # add its ecosystem here. #518. (site/ moved to me2resh/apexyard-site, #663)
   - package-ecosystem: "github-actions"
     directory: "/"
+    # Follow the release-cut model — open bump PRs against dev, not the default
+    # main branch (main only receives release PRs, AgDR-0007). #588.
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    # Group the codeql-action family so init/analyze/upload-sarif version
+    # bumps land as ONE PR instead of splitting. codeql.yml pins init and
+    # analyze to the same version — CodeQL fails CI if they mismatch, which
+    # is exactly what split PRs (#800 init, #801 analyze) produced. #807.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
     commit-message:
       prefix: "chore"
     labels:

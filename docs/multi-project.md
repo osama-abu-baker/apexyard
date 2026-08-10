@@ -323,7 +323,10 @@ JSON
 # fallback for un-migrated forks).
 echo "# This file marks the directory as an ApexYard ops fork (split-portfolio v2)." > .apexyard-fork
 
-git add .gitignore .claude/project-config.json .apexyard-fork
+# .claude/project-config.json is deliberately NOT staged (me2resh/apexyard#1031):
+# it is gitignored + untracked, so `git add` on it exits 1 and stops this step.
+# It also holds the private sibling-repo path, and this fork may be public.
+git add .gitignore .apexyard-fork
 git commit -m "chore: configure split-portfolio v2 (config-block path resolution + marker)"
 git push
 ```
@@ -717,7 +720,8 @@ jq --arg onb "$SIBLING/onboarding.yaml" \
     | .portfolio.workspace_dir = (.portfolio.workspace_dir // $ws)' \
    .claude/project-config.json > /tmp/pc.json && mv /tmp/pc.json .claude/project-config.json
 
-git add .gitignore .apexyard-fork .claude/project-config.json
+# .claude/project-config.json is deliberately NOT staged — see #1031.
+git add .gitignore .apexyard-fork
 ```
 
 ### Migrating from single-fork to split-portfolio
@@ -769,7 +773,6 @@ your-org/apexyard/                ← your fork, cloned locally (the "ops repo")
 ├── workflows/                     ← SDLC, code review, deployment
 ├── templates/                     ← PRD, tech design, ADR, AgDR
 ├── golden-paths/                  ← reusable CI pipelines
-├── site/                          ← the apexyard landing page (feel free to delete or replace)
 │
 ├── workspace/                     ← LIVE WORKING COPIES (gitignored)
 │   ├── README.md
@@ -814,7 +817,7 @@ Every portfolio skill reads `apexyard.projects.yaml` and iterates the registry.
 | `/idea` | Appends to `projects/ideas-backlog.md` at the fork root (one shared backlog for all projects) |
 | `/roadmap` | Reads `projects/<name>/roadmap.md`; asks which project if ambiguous |
 | `/stakeholder-update` | Portfolio rollup with a section per project |
-| `/handover` | Writes to `projects/<name>/handover-assessment.md`, appends the project to the registry, scores **harnessability** across 5 codebase dimensions (type safety, module boundaries, framework opinionation, test coverage signal, lint baseline) — with a `low`-verdict warning about Rex blocking-handbook false positives so adopters know whether to run handbooks in advisory-only mode (see AgDR-0042). **Step 7.5** surfaces the assessment's derived Next Steps inline and offers to file each as a tracker ticket (per-item y/n; auto-routes by item shape to `/feature` / `/task` / `/bug`; default `/task`; each filed ticket carries a `_Source: handover deep-dive on YYYY-MM-DD_` back-link to the assessment) — closes the recommendation-rot loop where static prose in the assessment used to be hand-translated to tickets one at a time. **Step 8** offers (default-no) to clone the project into `workspace/<name>/` for an LSP-aware deep-dive follow-up (`/code-review`, `/threat-model`, `/security-review`). The clone offer surfaces the cost (disk, gitignored status, `ENABLE_LSP_TOOL=1` + per-language plugin install) explicitly. |
+| `/handover` | Writes to `projects/<name>/handover-assessment.md`, appends the project to the registry, scores **harnessability** across 5 codebase dimensions (type safety, module boundaries, framework opinionation, test coverage signal, lint baseline) — with a `low`-verdict warning about Rex blocking-handbook false positives so adopters know whether to run handbooks in advisory-only mode (see AgDR-0042). **Step 7.5** surfaces the assessment's derived Next Steps inline and offers to file each as a tracker ticket (per-item y/n; auto-routes by item shape to `/feature` / `/task` / `/bug`; default `/task`; each filed ticket carries a `_Source: handover deep-dive on YYYY-MM-DD_` back-link to the assessment) — closes the recommendation-rot loop where static prose in the assessment used to be hand-translated to tickets one at a time. **Step 8** offers (default-no) to clone the project into `workspace/<name>/` for an LSP-aware deep-dive follow-up (`/code-review`, `/threat-model`, `/security-review`). The clone offer surfaces the cost (disk, gitignored status, `ENABLE_LSP_TOOL=1` + per-language plugin install) explicitly. **Step 8.5** offers (opt-in, default-OFF — row 8 of the step 5.6 checklist) to generate an in-repo **`AGENTS.md`** derived from the live assessment (real build/test/run commands, layout, conventions, gotchas) and deliver it into the **target repo via a branch + PR** — the single exception to the read-only-against-the-target-repo rule, never a direct commit and never via the ops-fork bootstrap path. **Role-split (no duplication, AgDR-0073):** `handover-assessment.md` (ops fork) is the **operator's** full analysis — risks, harnessability verdict, integration plan, next-step tickets; `AGENTS.md` (in the target repo) is the **agent's** concise operating manual — stable commands, layout, conventions, up-front gotchas — auto-loaded by any agent (Claude Code, Cursor, Codex) that works in the repo. `AGENTS.md` is canonical (a one-line `CLAUDE.md → @AGENTS.md` shim is offered only when no `CLAUDE.md` exists); an existing `AGENTS.md`/`CLAUDE.md` is preserved, never overwritten. **Step 8.6** offers (opt-in, default-OFF — row 9 of the step 5.6 checklist) to add a **"Governed by ApexYard" README badge** (or the `built_with` variant) to the target repo, the second and only other exception to the read-only rule — same branch + PR delivery as `AGENTS.md`, idempotent (skips if either badge variant is already present), never overwritten or swapped without the operator's say. The growth-loop rationale and design axes are recorded in AgDR-0090. |
 | `/extract-features` | Scans a project's codebase across six discovery axes (HTTP routes, data models, async jobs, test names, UI screens, documented features) and writes a consolidated Feature Inventory at `projects/<name>/feature-inventory.md`. Pairs with `/handover` as the **greenfield-rewrite path** — `/handover` produces the high-level project assessment, `/extract-features` produces the granular "what we must preserve" catalogue. One-off scan, not a recurring audit; re-runs OFFER (default-no) to overwrite. Opt-in `--with-mockups` flag adds a `## Screens` section with AI-inferred ASCII wireframes per UI screen — boxed layouts, form-field bindings inferred from static analysis, every wireframe carries a mandatory disclaimer header (`> AI-inferred sketch — verify before relying on`). See AgDR-0036 for the trust-contract rationale. |
 | `/feature-diagram` | Slice the system by feature — reads one row from `projects/<name>/feature-inventory.md` and emits a Mermaid `flowchart LR` at `projects/<name>/features/<slug>.md` showing the routes / models / jobs / screens that participate in that feature. Sibling to `/c4` (system topology) and `/dfd` (data flows) — different lens (per-feature slice) on the same codebase. Inventory is a hard dependency: run `/extract-features` first. Re-runs prompt to overwrite; `--force` bypasses. See AgDR-0035. |
 | `/process` | Anchor-scoped scan across **seven** process-discovery axes (explicit workflow definitions, queue/job chains, cron triggers, state-column transitions, API choreography, existing BPMN/Mermaid, documented steps) — optionally cross-repo via `apexyard.projects.yaml`. Interviews only on the gaps the code couldn't answer, then emits a lint-clean BPMN 2.0 file at `projects/<name>/processes/<slug>.bpmn`. Sibling to `/c4` (static system topology) and `/extract-features` (exhaustive feature catalogue) — same read-first-then-ask shape, BPMN as the output. Requires Node + npm for `bpmn-auto-layout` + `bpmnlint`; falls back to bare BPMN when Node is missing. |
@@ -837,6 +840,8 @@ Templates:
 - `templates/architecture/c4-context.md` — L1, system + external actors
 - `templates/architecture/c4-container.md` — L2, deployable units inside the system boundary
 
+**Escape hatch for L3+ (Structurizr DSL).** If a project needs component-level (L3) precision, auto-zoom across all levels from one model, or Structurizr Workspace features (tags, filtered views), `/c4 <project> --dsl` generates a `workspace.dsl` file instead — see `templates/architecture/c4-structurizr.dsl` and the `/c4` skill's "Escape hatch" section. Mermaid stays the default for L1/L2; this is additive, not a replacement, and introduces no new runtime dependency (rendering the `.dsl` is the adopter's own choice at [structurizr.com/dsl](https://structurizr.com/dsl), Structurizr Lite, or `structurizr-cli`). Decision rationale: [`docs/agdr/AgDR-0085-structurizr-dsl-escape-hatch.md`](agdr/AgDR-0085-structurizr-dsl-escape-hatch.md).
+
 Where to put the diagrams (same split as every other kind of doc — "would this follow the code if the project spun out?"):
 
 | Scope | Location |
@@ -847,7 +852,7 @@ Where to put the diagrams (same split as every other kind of doc — "would this
 
 ApexYard dogfoods its own convention — see `docs/architecture/apexyard-context.md` and `apexyard-container.md` for a worked example.
 
-Decision rationale (tool choice — Mermaid C4 over Structurizr DSL / PlantUML / D2): [`docs/agdr/AgDR-0003-mermaid-c4-for-diagrams.md`](agdr/AgDR-0003-mermaid-c4-for-diagrams.md).
+Decision rationale (tool choice — Mermaid C4 over Structurizr DSL / PlantUML / D2 for the L1/L2 default): [`docs/agdr/AgDR-0003-mermaid-c4-for-diagrams.md`](agdr/AgDR-0003-mermaid-c4-for-diagrams.md). Decision rationale for the Structurizr DSL escape hatch (emit-text-only, no new runtime dependency): [`docs/agdr/AgDR-0085-structurizr-dsl-escape-hatch.md`](agdr/AgDR-0085-structurizr-dsl-escape-hatch.md).
 
 ### PDF exports follow the same rule
 
@@ -962,7 +967,7 @@ Files you're most likely to customise:
 - `onboarding.yaml` — always yours, never upstream
 - `apexyard.projects.yaml` — always yours
 - `projects/<name>/` — always yours
-- `site/index.html` — delete or replace with your own landing page
+- (no site/ directory — the marketing site moved to me2resh/apexyard-site)
 - Role files in `roles/` — usually upstream, but feel free to edit for your team's voice
 
 Files that stay close to upstream (merge cleanly most of the time):
@@ -1049,7 +1054,7 @@ If your tracker has no CLI, use `kind: "custom"` with a `view_command` that call
 
 **What if I only have one repo?** Fork apexyard anyway and register that one repo. The skills work the same way. When you add a second project, just append to the registry — no migration, no re-setup.
 
-**Can I delete the landing page (`site/`)?** Yes — it's the apexyard marketing site. Feel free to delete, replace, or leave it in place. It doesn't affect the rest of the stack.
+**Where is the marketing site?** The landing page that used to live in `site/` has moved to its own repo ([me2resh/apexyard-site](https://github.com/me2resh/apexyard-site)) and is deployed at yard.apexscript.com. It is no longer bundled in the framework fork.
 
 **Can I rename my fork?** Yes. GitHub handles rename redirects cleanly. Your local clone will need `git remote set-url origin` after the rename.
 

@@ -169,7 +169,93 @@ case7() {
   rm -rf "$sb"
 }
 
-case1; case2; case3; case4; case5; case6; case7
+
+# -------------------- CASE 8: untracked bad markdown → no failure --------------------
+# Regression guard for #548: a markdownlint command driven by git ls-files must
+# NOT lint untracked files, so a lint-dirty untracked .md must not block the push.
+# The command string avoids \0 / null-delimiter JSON escapes (jq rejects \0);
+# filenames in sandboxes are space-free so plain xargs (newline-split) is safe here.
+case8() {
+  local sb; sb=$(make_sandbox)
+  # Configure markdownlint using git ls-files (the fixed command shape).
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '{"pre_push": {"commands": [{"name": "markdownlint", "run": "command -v npx >/dev/null 2>&1 || { echo INFO; exit 0; }; md_files=$(git ls-files '"'"'*.md'"'"' 2>/dev/null); [ -z \"$md_files\" ] && { echo INFO_SKIP; exit 0; }; echo \"$md_files\" | xargs npx --yes markdownlint-cli2 2>&1"}]}}' \
+    > "$sb/.claude/project-config.json"
+  # Drop a lint-dirty untracked markdown file.
+  # Critically, this file is NOT `git add`-ed, so git ls-files will not see it.
+  mkdir -p "$sb/.claude/skills/external-skill"
+  printf '# Bad heading  \n- item without blank line\n' \
+    > "$sb/.claude/skills/external-skill/DOCS.md"
+  # Push must succeed: the untracked file must be invisible to markdownlint.
+  run_hook "$sb" "$(push_json)" 0 "" "untracked-bad-md-ignored"
+  rm -rf "$sb"
+}
+
+# -------------------- CASE 9: tracked bad markdown → failure --------------------
+# Regression guard for #548: a lint error in a TRACKED markdown file must still
+# block the push, so the fix does not weaken the gate for real content.
+# Same command shape as case8 (space-safe xargs without -0, valid JSON).
+case9() {
+  local sb; sb=$(make_sandbox)
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '{"pre_push": {"commands": [{"name": "markdownlint", "run": "command -v npx >/dev/null 2>&1 || { echo INFO; exit 0; }; md_files=$(git ls-files '"'"'*.md'"'"' 2>/dev/null); [ -z \"$md_files\" ] && { echo INFO_SKIP; exit 0; }; echo \"$md_files\" | xargs npx --yes markdownlint-cli2 2>&1"}]}}' \
+    > "$sb/.claude/project-config.json"
+  # Create a lint-dirty markdown file and COMMIT it so git ls-files sees it.
+  # MD047 (files-end-with-single-newline) is reliably detectable without a
+  # markdownlint config: just omit the trailing newline.
+  printf '# README\nno-trailing-newline' > "$sb/README.md"
+  (cd "$sb" && git add README.md && git commit -q -m "chore: add bad README")
+  # npx must be available for this case to be meaningful; skip gracefully if not.
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "SKIP [tracked-bad-md-fails]: npx not available, case not executable"
+    return
+  fi
+  run_hook "$sb" "$(push_json)" 2 "markdownlint: FAILED" "tracked-bad-md-fails"
+  rm -rf "$sb"
+}
+
+# -------------------- CASE 10: marker MENTIONED in prose → does NOT bypass --------------------
+# Regression guard for #1097: the skip marker used to be grep-matched
+# unanchored, so a commit message that merely *discusses* the marker
+# (documentation, a review comment quoted verbatim, a revert body) matched
+# too and silently disabled every check. The match must be whole-line
+# (grep -x): a sentence that contains the marker string inline is NOT a
+# deliberate bypass, so the check must still run (and still block on a
+# failing command).
+case10() {
+  local sb; sb=$(make_sandbox)
+  cat > "$sb/.claude/project-config.json" <<'EOF'
+{"pre_push": {"commands": [{"name": "should-not-skip", "run": "echo oops; exit 1"}]}}
+EOF
+  # The marker appears INSIDE a sentence, not as its own line — this must
+  # NOT be treated as a deliberate bypass.
+  (cd "$sb" && git commit --amend -q -m "docs: explain the escape hatch
+
+This documents the <!-- pre-push: skip --> marker so contributors know
+it exists. It should not itself act as a bypass.")
+  run_hook "$sb" "$(push_json)" 2 "should-not-skip: FAILED" "marker-mentioned-in-prose-does-not-bypass"
+  rm -rf "$sb"
+}
+
+# -------------------- CASE 11: marker on its OWN LINE → still bypasses --------------------
+# The other direction of #1097's fix: a deliberate bypass — the marker as
+# a line by itself, exactly the shape the documented amend snippet emits —
+# must keep working after anchoring the match to -x.
+case11() {
+  local sb; sb=$(make_sandbox)
+  cat > "$sb/.claude/project-config.json" <<'EOF'
+{"pre_push": {"commands": [{"name": "should-skip", "run": "exit 1"}]}}
+EOF
+  (cd "$sb" && git commit --amend -q -m "fix: emergency hotfix
+
+<!-- pre-push: skip -->")
+  run_hook "$sb" "$(push_json)" 0 "pre-push gate bypassed by skip marker" "marker-own-line-still-bypasses"
+  rm -rf "$sb"
+}
+
+case1; case2; case3; case4; case5; case6; case7; case8; case9; case10; case11
 
 echo ""
 echo "==================================="

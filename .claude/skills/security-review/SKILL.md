@@ -1,7 +1,7 @@
 ---
 name: security-review
-description: Security-focused PR review for vulnerabilities and best practices. Invokes the Security Reviewer agent (Shield).
-disable-model-invocation: true
+description: Security-focused PR review for vulnerabilities and best practices. Invokes the Security Reviewer agent (Hakim).
+disable-model-invocation: false
 argument-hint: "<pr-number> [repo]"
 allowed-tools: Bash, Read, Grep, Glob
 ---
@@ -20,7 +20,7 @@ Per-language LSP plugins live in Claude Code's marketplace. Install once; the sk
 
 When `/security-review` runs:
 
-1. **Primary reviewer**: the **Security Reviewer agent (Shield)** at [`.claude/agents/security-reviewer.md`](../../agents/security-reviewer.md) — runs the automated security checklist.
+1. **Primary reviewer**: the **Security Reviewer agent (Hakim)** at [`.claude/agents/security-reviewer.md`](../../agents/security-reviewer.md) — runs the automated security checklist.
 2. **Human approval gate**: the **[Security Auditor](../../../roles/security/security-auditor.md)** role — activates on any PR that touches auth / crypto / secrets / user data / PII, or when `/security-review` is explicitly invoked.
 3. **Escalation for strategic calls**: the **[Head of Security](../../../roles/security/head-of-security.md)** — threat modelling, compliance decisions, or novel attack surfaces.
 4. **For active testing**: the **[Penetration Tester](../../../roles/security/penetration-tester.md)** — exploit discovery, API security review, pre-release security sign-off.
@@ -45,7 +45,35 @@ Invoke for PRs that touch:
 - Third-party integrations
 - Cryptography or secrets
 
+## Process
+
+### 0. Write the active-reviewer marker (REQUIRED — me2resh/apexyard#843)
+
+Before spawning the Security Reviewer agent, write the active-reviewer session marker. It records that this review pass is the sanctioned one and suppresses `warn-review-marker-write.sh`'s advisory warning on the `*-security.approved` write (same convention as `/code-review`'s rex marker; that hook warns and never blocks since #1026 — AgDR-0111). At skill entry:
+
+```bash
+ops_root=$(git rev-parse --show-toplevel)
+r="$ops_root"
+while [ -n "$r" ] && [ "$r" != "/" ]; do
+  [ -f "$r/.apexyard-fork" ] && { ops_root="$r"; break; }
+  [ -f "$r/onboarding.yaml" ] && [ -f "$r/apexyard.projects.yaml" ] && { ops_root="$r"; break; }
+  r=$(dirname "$r")
+done
+mkdir -p "$ops_root/.claude/session"
+printf '%s\n' "<owner/repo>#<pr>:security" > "$ops_root/.claude/session/active-reviewer"
+```
+
+On skill exit (after the review is posted), clear the marker:
+
+```bash
+rm -f "$ops_root/.claude/session/active-reviewer"
+```
+
+Nothing mechanically stops a build-class sub-agent writing the same file; what makes this marker legitimate is that a real, independent review happened. See `.claude/hooks/warn-review-marker-write.sh` and `.claude/rules/pr-workflow.md` § "Build agents cannot self-review".
+
 ## Security Checklist
+
+> Baseline: OWASP Top 10 (2025) — supply-chain failures are now #3; use OWASP ASVS 5.0 as the verification baseline for these checks.
 
 ### Secrets & Credentials
 
@@ -102,11 +130,11 @@ Posts a GitHub review with:
 - Issues with severity
 - Verdict
 
-Invokes: Security Reviewer Agent (Shield)
+Invokes: Security Reviewer Agent (Hakim)
 
 ## Persist the run + render trend
 
-After the Security Reviewer agent posts the GitHub review, persist a structured artefact via the shared audit-history lib so the security-review trend across PRs becomes legible. See `docs/agdr/AgDR-0019-audit-artefact-persistence.md` for the schema rationale.
+After the Security Reviewer agent posts the review — through the tracker-agnostic `tracker_review_submit` (gh PR / glab MR / custom host — #763), not a hardcoded `gh pr review` — persist a structured artefact via the shared audit-history lib so the security-review trend across PRs becomes legible. See `docs/agdr/AgDR-0019-audit-artefact-persistence.md` for the schema rationale.
 
 ### 1. Resolve project name + score + verdict
 

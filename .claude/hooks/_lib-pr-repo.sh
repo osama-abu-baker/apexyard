@@ -31,6 +31,13 @@
 #       (or if there is no `--repo` flag, in which case they implicitly match).
 #       Returns 1 if they differ (cross-repo context).
 #
+#   pr_cmd_cd_target <command>
+#       Echoes the path from a leading `cd <path> && …` (or `cd <path>; …`)
+#       prefix in the command, or empty string if absent. Used by PR-create
+#       hooks to discover the directory the `gh` call is ABOUT to run in — the
+#       PreToolUse hook fires before the in-command `cd` executes, so the
+#       hook's own cwd is NOT yet the PR's repo (me2resh/apexyard#669).
+#
 # USAGE
 # -----
 #   . "$(dirname "$0")/_lib-pr-repo.sh"
@@ -65,6 +72,89 @@ _git_remote_to_slug() {
   local url="$1"
   echo "$url" | sed -nE \
     's|.*[:/]([^/:]+/[^/]+)\.git$|\1|p; s|.*[:/]([^/:]+/[^/]+)$|\1|p' | head -1
+}
+
+# Internal: expand a leading `~` or `~user` in a path to an absolute path.
+#
+# WHY THIS EXISTS (me2resh/apexyard bug report, 2026-07)
+# -------------------------------------------------------
+# `pr_cmd_cd_target` extracts the literal path text from a `cd <path> && …`
+# prefix. When the operator's command reads `cd ~/Projects/foo && gh pr
+# create …`, the extracted path is the literal string `~/Projects/foo` — the
+# shell would expand that tilde when it actually runs the `cd`, but this hook
+# never runs a shell over the extracted string, it hands it straight to
+# `git -C`. `git -C` does NOT perform tilde-expansion (it treats `~` as a
+# literal directory-name character), so `git -C "~/Projects/foo"` fails
+# silently, every caller's cd-target resolution comes back empty, and each
+# hook falls back to its own cwd (typically the ops-fork root on `dev`) —
+# producing misleading errors like "Branch 'dev' missing ticket ID" for a
+# perfectly valid PR from a tilde-path worktree.
+#
+# This helper mirrors the shell's own tilde-expansion rules for the two forms
+# that matter:
+#   `~` / `~/...`       → the current user's $HOME
+#   `~user` / `~user/…` → that user's home directory, resolved via `eval echo`
+#                          ONLY after validating the extracted token looks
+#                          like a real username (alnum/dot/dash/underscore) —
+#                          refuses to eval anything that could smuggle shell
+#                          metacharacters through the path text.
+#
+# Graceful fallback: if expansion cannot be resolved (unknown user, `eval`
+# failure), the original string is returned unchanged rather than throwing —
+# callers already treat an unresolvable `git -C` target as "can't check from
+# here" and degrade non-misleadingly (skip/warn), so returning the original
+# text preserves that existing, safe behaviour rather than fabricating a path.
+#
+# Security note (Hakim / PR #792 review): the username allowlist check below
+# uses bash's `[[ =~ ]]` against the WHOLE string, anchored at both ends —
+# deliberately NOT `grep -qE '^…$'`, which matches per LINE. A multi-line
+# `$user` whose first line happens to look like a valid username would pass
+# a per-line grep check and reach `eval` with the remaining lines still
+# attached (a latent command-injection surface in a trust-chain hook). Not
+# reachable through today's sole caller (`pr_cmd_cd_target`'s `sed` output is
+# always single-line, further guaranteed by `head -1`), but this is a shared
+# lib function — a future caller that skips that sanitization would open the
+# hole `[[ =~ ]]` closes here for free (the whole-string anchor treats a
+# newline as just another character the charset must match, so ANY embedded
+# newline fails the check).
+_pr_repo_expand_tilde() {
+  local p="$1"
+  # shellcheck disable=SC2088  # intentional: matching a literal leading '~'
+  # in a case pattern, not asking the shell to expand it here.
+  case "$p" in
+    '~')
+      printf '%s' "$HOME"
+      ;;
+    '~/'*)
+      printf '%s' "$HOME/${p#\~/}"
+      ;;
+    '~'*)
+      local rest user tail_part home
+      rest="${p#\~}"
+      user="${rest%%/*}"
+      tail_part=""
+      case "$rest" in
+        */*) tail_part="/${rest#*/}" ;;
+      esac
+      if [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        home=$(eval echo "~${user}" 2>/dev/null)
+        case "$home" in
+          '~'*|'')
+            printf '%s' "$p"  # unresolved (no such user) — return unchanged
+            ;;
+          *)
+            printf '%s%s' "$home" "$tail_part"
+            ;;
+        esac
+      else
+        # Token doesn't look like a safe username — don't eval it.
+        printf '%s' "$p"
+      fi
+      ;;
+    *)
+      printf '%s' "$p"
+      ;;
+  esac
 }
 
 # Public: pr_cmd_target_repo <command>
@@ -115,6 +205,31 @@ git_origin_repo() {
   local url
   url=$(git -C "$git_dir" remote get-url origin 2>/dev/null) || return 1
   _git_remote_to_slug "$url"
+}
+
+# Public: pr_cmd_cd_target <command>
+#   Echoes the path from a leading `cd <path> && …` / `cd <path>; …` prefix,
+#   or empty string when the command does not start with a `cd`.
+#
+#   Only a `cd` at the START of the command is honoured (the harness-generated
+#   `cd <repo> && gh pr …` pattern). A `cd` buried later in a pipeline is
+#   intentionally ignored — it does not establish the directory the leading
+#   `gh` runs in. Handles unquoted, single-quoted, and double-quoted paths so
+#   `cd '../my repo' && …` resolves correctly.
+pr_cmd_cd_target() {
+  local cmd="$1"
+  local raw
+  # Strip leading whitespace, then match `cd ` followed by a quoted or bare
+  # path up to the first `&&`, `;`, or `|` separator.
+  raw=$(printf '%s' "$cmd" | sed -nE \
+    "s/^[[:space:]]*cd[[:space:]]+\"([^\"]+)\"[[:space:]]*(&&|;|\|).*/\1/p;
+     s/^[[:space:]]*cd[[:space:]]+'([^']+)'[[:space:]]*(&&|;|\|).*/\1/p;
+     s/^[[:space:]]*cd[[:space:]]+([^&;|[:space:]]+)[[:space:]]*(&&|;|\|).*/\1/p" \
+    | head -1)
+  [ -z "$raw" ] && return 0
+  # Expand a leading ~ / ~user before handing the path to any caller — git -C
+  # does not shell-expand tilde itself (see _pr_repo_expand_tilde above).
+  _pr_repo_expand_tilde "$raw"
 }
 
 # Public: pr_repo_matches_cwd <command> [<git-dir>]

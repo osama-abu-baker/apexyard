@@ -1,0 +1,573 @@
+#!/bin/bash
+# Tests for block-merge-on-red-ci.sh — forge-aware CI-status gate (#790).
+#
+# #767 made block-unreviewed-merge.sh forge-aware (gh/glab); this hook was
+# the one sibling merge gate still hardcoded to `gh pr checks`, so a GitLab
+# project's `glab mr merge` sailed through with no CI-status check at all.
+# This suite proves:
+#
+#   - the gh path is byte-identical to pre-#790 behaviour (green/red/no-CI/
+#     variable-substituted/non-merge cases, mirroring the hook's own header
+#     comment contract)
+#   - the new glab path resolves the MR's head-pipeline status via a mocked
+#     `glab mr view --output json` and maps it to the same allow/block shape
+#   - the glab path FAILS CLOSED when the pipeline status can't be resolved
+#     at all (glab missing / network-auth failure / unparseable response) —
+#     an unresolvable status must never be treated as green
+#
+# Each case builds an isolated sandbox with the hook + _lib-extract-pr.sh,
+# mocks `gh` and/or `glab` to return a deterministic status without hitting
+# any real forge, pipes a synthetic PreToolUse JSON for the merge command,
+# and asserts exit code (0 = pass-through, 2 = blocked) + a stderr regex.
+#
+# Exit 0 if all cases pass; 1 on first failure.
+
+set -u
+
+SRC_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+HOOK_SRC="$SRC_ROOT/.claude/hooks/block-merge-on-red-ci.sh"
+LIB_PR="$SRC_ROOT/.claude/hooks/_lib-extract-pr.sh"
+
+for f in "$HOOK_SRC" "$LIB_PR"; do
+  if [ ! -f "$f" ]; then
+    echo "FAIL: required source missing: $f" >&2
+    exit 1
+  fi
+done
+
+PASS=0
+FAIL=0
+FAILED_CASES=""
+
+TEST_REPO="me2resh/apexyard"
+
+# make_sandbox <gh_mode> <glab_mode>
+#   gh_mode:   green | red | none | ""  (mock `gh pr checks` behaviour)
+#   glab_mode: success | pending | failure | none | unresolvable |
+#              nonzero_exit | auth_error | http_error | truncated |
+#              scalar | array | ""
+#              (mock `glab mr view --output json` behaviour)
+# Empty mode = mock exits 0 with no output (only relevant CLI is installed
+# per test; the other is left as a stub that should never be called).
+#
+# The "success" / "pending" / "failure" / "none" bodies all include an
+# `.iid` field, matching a real `glab mr view --output json` response —
+# this is what `resolve_ci_status_glab`'s MR-object validity check keys
+# off (#793 fail-open fix). The new failure-shape modes below deliberately
+# omit `.iid` (or aren't a JSON object at all), the way a broken/hostile
+# response would be.
+make_sandbox() {
+  local gh_mode="$1" glab_mode="$2"
+  local sb
+  sb=$(mktemp -d)
+  mkdir -p "$sb/.claude/hooks" "$sb/bin"
+  cp "$HOOK_SRC" "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+  cp "$LIB_PR"   "$sb/.claude/hooks/_lib-extract-pr.sh"
+  chmod +x "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+
+  cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr checks"*)
+    case "$gh_mode" in
+      green) printf 'build\tpass\t1m\thttps://x\n'; exit 0 ;;
+      red)   printf 'build\tfail\t1m\thttps://x\n'; exit 1 ;;
+      none)  echo "no checks reported on the 'feature' branch"; exit 8 ;;
+      *)     exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/gh"
+
+  cat > "$sb/bin/glab" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"mr view"*)
+    case "$glab_mode" in
+      success)      echo '{"iid":1,"head_pipeline":{"status":"success"}}' ;;
+      pending)      echo '{"iid":1,"head_pipeline":{"status":"running"}}' ;;
+      failure)      echo '{"iid":1,"head_pipeline":{"status":"failed"}}' ;;
+      none)         echo '{"iid":1,"head_pipeline":null}' ;;
+      unresolvable) exit 1 ;;
+      # --- fail-open regression cases (#793) ---
+      # glab exits non-zero but still prints something on stdout (a
+      # content-only emptiness check would miss this; the exit code
+      # must be honored).
+      nonzero_exit) echo '{"iid":1,"head_pipeline":{"status":"success"}}'; exit 1 ;;
+      # GitLab REST error envelopes — valid JSON, exit 0, but NOT an MR
+      # object (no .iid). Previously mapped to "none" -> ALLOW.
+      auth_error)   echo '{"message":"401 Unauthorized"}' ;;
+      # An intermediary (proxy / captive portal / SSO gateway) returning
+      # an HTML error page on stdout instead of JSON.
+      http_error)   echo '<html><body>502 Bad Gateway</body></html>' ;;
+      # Truncated/partial JSON body.
+      truncated)    echo '{"head_pipeline":' ;;
+      # A bare JSON scalar (not an object).
+      scalar)       echo '"unexpected"' ;;
+      # A JSON array (not an object).
+      array)        echo '[1,2,3]' ;;
+      *)            exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/glab"
+
+  echo "$sb"
+}
+
+run_case() {
+  local label="$1" want_rc="$2" want_stderr_regex="$3" sb="$4" cmd="$5"
+  local input
+  input=$(jq -nc --arg c "$cmd" '{tool_name:"Bash", tool_input:{command:$c}}')
+  local got_stderr got_rc
+  got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c "echo '$input' | bash .claude/hooks/block-merge-on-red-ci.sh" 2>&1 >/dev/null)
+  got_rc=$?
+  rm -rf "$sb"
+
+  if [ "$got_rc" != "$want_rc" ]; then
+    echo "FAIL [$label]: want rc=$want_rc, got $got_rc (stderr: ${got_stderr:0:300})" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  if [ -n "$want_stderr_regex" ] && ! echo "$got_stderr" | grep -qE "$want_stderr_regex"; then
+    echo "FAIL [$label]: stderr did not match /$want_stderr_regex/" >&2
+    echo "    stderr: $got_stderr" >&2
+    FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}${label} "; return
+  fi
+  echo "PASS [$label]"
+  PASS=$((PASS+1))
+}
+
+# ======================================================================
+# GH PATH — regression (must stay byte-identical to pre-#790 behaviour)
+# ======================================================================
+
+sb=$(make_sandbox green "")
+run_case "gh: green CI -> allows" 0 "" "$sb" \
+  "gh pr merge 300 --repo $TEST_REPO --squash"
+
+sb=$(make_sandbox red "")
+run_case "gh: red CI -> blocks" 2 "red CI" "$sb" \
+  "gh pr merge 301 --repo $TEST_REPO --squash"
+
+sb=$(make_sandbox none "")
+run_case "gh: no checks configured -> allows (no-op note)" 0 "" "$sb" \
+  "gh pr merge 302 --repo $TEST_REPO --squash"
+
+sb=$(make_sandbox red "")
+run_case "gh: variable-substituted merge -> blocks" 2 "variable-substituted" "$sb" \
+  'gh pr merge $PR --repo me2resh/apexyard --squash'
+
+sb=$(make_sandbox red "")
+run_case "gh: non-merge command -> no-op" 0 "" "$sb" \
+  "gh pr view 303 --repo $TEST_REPO"
+
+sb=$(make_sandbox red "")
+run_case "gh: gh-api merge shape, red CI -> blocks" 2 "red CI" "$sb" \
+  "gh api repos/me2resh/apexyard/pulls/304/merge -X PUT"
+
+# ======================================================================
+# GLAB PATH — new (#790)
+# ======================================================================
+
+sb=$(make_sandbox "" success)
+run_case "glab: pipeline success -> allows" 0 "" "$sb" \
+  "glab mr merge 400 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" pending)
+run_case "glab: pipeline pending -> blocks" 2 "red or unresolvable" "$sb" \
+  "glab mr merge 401 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" failure)
+run_case "glab: pipeline failed -> blocks" 2 "red or unresolvable" "$sb" \
+  "glab mr merge 402 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" none)
+run_case "glab: no pipeline configured -> allows (no-op note)" 0 "" "$sb" \
+  "glab mr merge 403 -R $TEST_REPO --squash"
+
+# Fail-closed: glab CLI failure / unparseable response -> BLOCK, never allow.
+sb=$(make_sandbox "" unresolvable)
+run_case "glab: unresolvable status -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 404 -R $TEST_REPO --squash"
+
+# ----------------------------------------------------------------------
+# Fail-OPEN regression suite (#793 / Hakim HIGH finding): a non-empty
+# glab response that ISN'T a valid MR object must still BLOCK, not fall
+# through to the "none" allow-arm. The pre-fix implementation only
+# checked stdout emptiness, so every case below used to resolve to
+# "none" -> exit 0 (ALLOW) despite being an error/garbage response.
+# ----------------------------------------------------------------------
+
+sb=$(make_sandbox "" nonzero_exit)
+run_case "glab: non-zero exit (even with stdout output) -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 408 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" auth_error)
+run_case "glab: JSON auth-error envelope (401) -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 409 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" http_error)
+run_case "glab: HTML error page on stdout -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 410 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" truncated)
+run_case "glab: truncated/garbage JSON -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 411 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" scalar)
+run_case "glab: bare JSON scalar response -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 412 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" array)
+run_case "glab: JSON array response -> blocks (fail closed)" 2 "unresolvable" "$sb" \
+  "glab mr merge 413 -R $TEST_REPO --squash"
+
+sb=$(make_sandbox "" pending)
+run_case "glab: variable-substituted merge -> blocks" 2 "variable-substituted" "$sb" \
+  'glab mr merge $MR -R me2resh/apexyard --squash'
+
+sb=$(make_sandbox "" pending)
+run_case "glab: non-merge command -> no-op" 0 "" "$sb" \
+  "glab mr view 405 -R $TEST_REPO"
+
+sb=$(make_sandbox "" success)
+run_case "glab: raw-API merge shape, pipeline success -> allows" 0 "" "$sb" \
+  "glab api projects/me6resh%2Fapexyard/merge_requests/406/merge -X PUT"
+
+sb=$(make_sandbox "" failure)
+run_case "glab: raw-API merge shape, pipeline failed -> blocks" 2 "red or unresolvable" "$sb" \
+  "glab api projects/me6resh%2Fapexyard/merge_requests/407/merge -X PUT"
+
+# ======================================================================
+# tracker_pr_merge WRAPPER SHAPE (#759 gate-coverage regression) — the
+# wrapper's own text never says "gh" or "glab" (that's the whole point of
+# the abstraction), so this hook's forge dispatch cannot rely on
+# `_forge_from_command` (text-based) for the wrapper the way it does for an
+# explicit `gh pr merge` / `glab mr merge` command — it must consult the
+# REGISTRY (`tracker_kind` / `_forge_kind_for`) instead. This needs its own
+# sandbox because it's the one case that requires `_lib-tracker.sh` +
+# a real `apexyard.projects.yaml` registry entry, which the other cases
+# above don't need (they dispatch on command text alone).
+# ======================================================================
+
+TRACKER_LIB="$SRC_ROOT/.claude/hooks/_lib-tracker.sh"
+CONFIG_LIB="$SRC_ROOT/.claude/hooks/_lib-read-config.sh"
+PORTFOLIO_LIB="$SRC_ROOT/.claude/hooks/_lib-portfolio-paths.sh"
+OPSROOT_LIB="$SRC_ROOT/.claude/hooks/_lib-ops-root.sh"
+
+# make_sandbox_wrapper <glab_mode> — a registered glab-kind project so
+# `tracker_kind "g/p"` (and therefore `_forge_kind_for`) resolves to glab from
+# the REGISTRY, not the command text.
+make_sandbox_wrapper() {
+  local glab_mode="$1"
+  local sb
+  sb=$(mktemp -d)
+  mkdir -p "$sb/.claude/hooks" "$sb/bin"
+  cp "$HOOK_SRC"      "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+  cp "$LIB_PR"        "$sb/.claude/hooks/_lib-extract-pr.sh"
+  cp "$TRACKER_LIB"   "$sb/.claude/hooks/_lib-tracker.sh"
+  cp "$CONFIG_LIB"    "$sb/.claude/hooks/_lib-read-config.sh"
+  cp "$PORTFOLIO_LIB" "$sb/.claude/hooks/_lib-portfolio-paths.sh"
+  [ -f "$OPSROOT_LIB" ] && cp "$OPSROOT_LIB" "$sb/.claude/hooks/_lib-ops-root.sh"
+  chmod +x "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+  touch "$sb/onboarding.yaml"
+  cat > "$sb/.claude/project-config.defaults.json" <<'JSON'
+{ "tracker": { "kind": "gh" } }
+JSON
+  cat > "$sb/apexyard.projects.yaml" <<'YAML'
+version: 1
+projects:
+  - name: gl
+    repo: g/p
+    tracker:
+      kind: glab
+YAML
+  cat > "$sb/bin/glab" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"mr view"*)
+    case "$glab_mode" in
+      success) echo '{"iid":1,"head_pipeline":{"status":"success"}}' ;;
+      failure) echo '{"iid":1,"head_pipeline":{"status":"failed"}}' ;;
+      *)       exit 1 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/glab"
+  # gh must NOT be consulted for a glab-registered project's wrapper call —
+  # make it fail loudly (nonzero + wrong-looking text) if it ever is.
+  cat > "$sb/bin/gh" <<'EOF'
+#!/bin/bash
+echo "WRONG: gh should not be called for a glab-registered project" >&2
+exit 1
+EOF
+  chmod +x "$sb/bin/gh"
+  echo "$sb"
+}
+
+WRAPPER_CMD_TMPL='. "%s/.claude/hooks/_lib-tracker.sh"
+MERGE_RESULT=$(tracker_pr_merge "g/p" "500" "squash" true)'
+
+sb=$(make_sandbox_wrapper success)
+run_case "wrapper: glab-registered project, pipeline success -> allows (forge dispatched via registry, not command text)" 0 "" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+sb=$(make_sandbox_wrapper failure)
+run_case "wrapper: glab-registered project, pipeline failed -> blocks (forge dispatched via registry, not command text)" 2 "red or unresolvable" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+# ----------------------------------------------------------------------
+# #1121: the registry read inside _forge_kind_for (_lib-tracker.sh's
+# _tracker_project_value) needs `yq` OR `python3`+PyYAML to parse the
+# per-project override; when NEITHER is available it silently falls through
+# to the GLOBAL tracker.kind default ("gh") — wrong for a glab-registered
+# project's wrapper call. The two cases above only caught this by accident
+# of THIS environment happening to lack yq/PyYAML; make it deterministic by
+# stubbing yq/python3 to behave exactly like "no override found here"
+# regardless of what the host actually has installed, so this regression
+# can't silently stop being exercised if the CI image ever gains yq.
+# ----------------------------------------------------------------------
+
+# make_sandbox_wrapper_no_yaml_tools <glab_mode> — same registry/glab stub as
+# make_sandbox_wrapper, PLUS yq/python3 stubs that always fail to produce a
+# per-project override (matching real yq-absent / PyYAML-absent behaviour),
+# forcing block-merge-on-red-ci.sh's registry fallback (_registry_glab_fallback)
+# to be the thing that resolves the forge correctly.
+make_sandbox_wrapper_no_yaml_tools() {
+  local glab_mode="$1"
+  local sb
+  sb=$(make_sandbox_wrapper "$glab_mode")
+  cat > "$sb/bin/yq" <<'EOF'
+#!/bin/bash
+# Simulates yq being unusable for this lookup (matches "yq not installed"
+# from the caller's perspective: no stdout, non-zero exit).
+exit 1
+EOF
+  chmod +x "$sb/bin/yq"
+  cat > "$sb/bin/python3" <<'EOF'
+#!/bin/bash
+# Simulates python3 without PyYAML installed. The real
+# _tracker_project_value heredoc catches the ImportError and exits 0 with
+# no stdout; this stub reproduces that exact observable behaviour.
+exit 0
+EOF
+  chmod +x "$sb/bin/python3"
+  echo "$sb"
+}
+
+sb=$(make_sandbox_wrapper_no_yaml_tools success)
+run_case "#1121: wrapper, glab-registered project, NO yq/PyYAML -> still allows on green pipeline (registry fallback engages)" 0 "" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+sb=$(make_sandbox_wrapper_no_yaml_tools failure)
+run_case "#1121: wrapper, glab-registered project, NO yq/PyYAML -> still blocks on red pipeline (registry fallback engages)" 2 "red or unresolvable" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+# make_sandbox_wrapper_gh_no_yaml_tools <gh_mode> — a GENUINELY gh-kind
+# project (no tracker: override at all — relies on the global default),
+# with yq/python3 stubbed the same unusable way. Proves the #1121 fallback
+# never produces a FALSE positive: it must not flip a real gh-kind project
+# to glab just because the registry lookup came back empty for other
+# reasons. `glab` fails loudly if ever invoked, mirroring the existing
+# "gh must NOT be consulted" pattern in reverse.
+make_sandbox_wrapper_gh_no_yaml_tools() {
+  local gh_mode="$1"
+  local sb
+  sb=$(mktemp -d)
+  mkdir -p "$sb/.claude/hooks" "$sb/bin"
+  cp "$HOOK_SRC"      "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+  cp "$LIB_PR"        "$sb/.claude/hooks/_lib-extract-pr.sh"
+  cp "$TRACKER_LIB"   "$sb/.claude/hooks/_lib-tracker.sh"
+  cp "$CONFIG_LIB"    "$sb/.claude/hooks/_lib-read-config.sh"
+  cp "$PORTFOLIO_LIB" "$sb/.claude/hooks/_lib-portfolio-paths.sh"
+  [ -f "$OPSROOT_LIB" ] && cp "$OPSROOT_LIB" "$sb/.claude/hooks/_lib-ops-root.sh"
+  chmod +x "$sb/.claude/hooks/block-merge-on-red-ci.sh"
+  touch "$sb/onboarding.yaml"
+  cat > "$sb/.claude/project-config.defaults.json" <<'JSON'
+{ "tracker": { "kind": "gh" } }
+JSON
+  cat > "$sb/apexyard.projects.yaml" <<'YAML'
+version: 1
+projects:
+  - name: gh-proj
+    repo: g/p2
+    roles:
+      - backend-engineer
+      - platform-engineer
+    tags:
+      - customer-facing
+YAML
+  cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+case "\$*" in
+  *"pr checks"*)
+    case "$gh_mode" in
+      green) printf 'build\tpass\t1m\thttps://x\n'; exit 0 ;;
+      red)   printf 'build\tfail\t1m\thttps://x\n'; exit 1 ;;
+      *)     exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/gh"
+  cat > "$sb/bin/glab" <<'EOF'
+#!/bin/bash
+echo "WRONG: glab should not be called for a gh-registered project" >&2
+exit 1
+EOF
+  chmod +x "$sb/bin/glab"
+  cat > "$sb/bin/yq" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+  chmod +x "$sb/bin/yq"
+  cat > "$sb/bin/python3" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$sb/bin/python3"
+  echo "$sb"
+}
+
+WRAPPER_CMD_TMPL2='. "%s/.claude/hooks/_lib-tracker.sh"
+MERGE_RESULT=$(tracker_pr_merge "g/p2" "501" "squash" true)'
+
+sb=$(make_sandbox_wrapper_gh_no_yaml_tools green)
+run_case "#1121: wrapper, gh-kind project (no tracker override), NO yq/PyYAML -> allows on green CI (no false-positive glab)" 0 "" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL2" "$sb")"
+
+sb=$(make_sandbox_wrapper_gh_no_yaml_tools red)
+run_case "#1121: wrapper, gh-kind project (no tracker override), NO yq/PyYAML -> blocks on red CI (no false-positive glab)" 2 "red CI" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL2" "$sb")"
+
+# ----------------------------------------------------------------------
+# #1121 (position-dependence): _registry_glab_fallback's awk emitted the
+# match BOTH mid-stream (`print "glab"; exit`) AND again in its END block
+# (awk's `exit` runs END, and block_repo/block_kind were still set), so
+# `found` became "glab\nglab" and the caller's exact `= "glab"` compare
+# FAILED — a false miss whenever the glab target block was NOT the last
+# registry entry. The single-project registry in make_sandbox_wrapper only
+# ever exercised the "sole/last entry" shape, hiding the bug. These cases
+# put a gh-kind block AFTER the glab target (g/p) so the mid-stream branch
+# fires; on the buggy code the fallback misses -> forge stays gh -> the
+# loud `gh` stub is (wrongly) consulted -> unresolvable -> BLOCK even on a
+# green glab pipeline. On the fixed code the fallback resolves glab and the
+# green pipeline ALLOWS / a red one BLOCKS, position-independently.
+# ----------------------------------------------------------------------
+
+# make_sandbox_wrapper_no_yaml_tools_glab_not_last <glab_mode> <position>
+# Same yq/PyYAML-absent glab sandbox as make_sandbox_wrapper_no_yaml_tools,
+# but the glab target (g/p) is NOT the last registry entry. position:
+# "first"  = glab first of two (gh-kind block after it);
+# "middle" = glab middle of three (gh-kind block before AND after it).
+make_sandbox_wrapper_no_yaml_tools_glab_not_last() {
+  local glab_mode="$1" position="$2"
+  local sb
+  sb=$(make_sandbox_wrapper_no_yaml_tools "$glab_mode")
+  if [ "$position" = "middle" ]; then
+    cat > "$sb/apexyard.projects.yaml" <<'YAML'
+version: 1
+projects:
+  - name: gh-before
+    repo: g/before
+    tracker:
+      kind: gh
+  - name: gl
+    repo: g/p
+    tracker:
+      kind: glab
+  - name: gh-after
+    repo: g/after
+    tracker:
+      kind: gh
+YAML
+  else
+    cat > "$sb/apexyard.projects.yaml" <<'YAML'
+version: 1
+projects:
+  - name: gl
+    repo: g/p
+    tracker:
+      kind: glab
+  - name: gh-after
+    repo: g/after
+    tracker:
+      kind: gh
+YAML
+  fi
+  echo "$sb"
+}
+
+sb=$(make_sandbox_wrapper_no_yaml_tools_glab_not_last success first)
+run_case "#1121: wrapper, glab project FIRST of two, NO yq/PyYAML -> allows on green pipeline (fallback position-independent)" 0 "" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+sb=$(make_sandbox_wrapper_no_yaml_tools_glab_not_last failure first)
+run_case "#1121: wrapper, glab project FIRST of two, NO yq/PyYAML -> blocks on red pipeline (fallback position-independent)" 2 "red or unresolvable" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+sb=$(make_sandbox_wrapper_no_yaml_tools_glab_not_last success middle)
+run_case "#1121: wrapper, glab project MIDDLE of three, NO yq/PyYAML -> allows on green pipeline (fallback position-independent)" 0 "" "$sb" \
+  "$(printf "$WRAPPER_CMD_TMPL" "$sb")"
+
+# --- Fail-closed on jq-unavailable/unparseable input (#965) ------------
+#
+# Reuses make_sandbox's green gh mock, then shadows jq with a stub that
+# always fails — same code path as jq being entirely missing from PATH.
+make_sandbox_broken_jq() {
+  local sb
+  sb=$(make_sandbox green "")
+  cat > "$sb/bin/jq" <<'EOF'
+#!/bin/bash
+# Simulates a broken/unavailable jq: always fails, no output. See #965.
+exit 1
+EOF
+  chmod +x "$sb/bin/jq"
+  echo "$sb"
+}
+
+sb=$(make_sandbox_broken_jq)
+run_case "#965: jq broken, gh pr merge -> BLOCKS (fail closed, CI status unverifiable)" 2 \
+  "cannot evaluate this command" "$sb" \
+  "gh pr merge 302 --repo $TEST_REPO --squash"
+
+sb=$(make_sandbox_broken_jq)
+run_case "#965: jq broken, clearly non-merge command -> stays a no-op" 0 "" "$sb" \
+  "npm test"
+
+# --- Fail-closed on JSON-escaped separators in the raw-payload fallback
+#     (#973, Hakim's residual finding on the #965/#969 fix) ------------
+#
+# Same reasoning as the sibling case in test_block_unreviewed_merge.sh: a
+# merge command whose separators are JSON-escaped (a literal tab encodes
+# as the two-character sequence `\t`) is not whitespace to
+# is_merge_command's `\s+` class, so pre-#973 it evaded the raw-payload
+# fallback scan entirely while jq was unavailable to decode it. `run_case`
+# builds the payload with the real system jq (before the sandboxed
+# broken-jq stub is on PATH), so a literal tab placed in the command here
+# is correctly JSON-escaped in the resulting payload — exactly the shape
+# the fallback has to recognise without jq's help.
+sb=$(make_sandbox_broken_jq)
+tab_cmd=$'gh\tpr\tmerge 306 --repo me2resh/apexyard --squash'
+run_case "#973: jq broken, JSON-escaped-tab merge command -> BLOCKS (fail closed)" 2 \
+  "cannot evaluate this command" "$sb" "$tab_cmd"
+
+sb=$(make_sandbox_broken_jq)
+tab_nonmerge_cmd=$'echo\tnot\ta\tmerge\tcommand\tat\tall'
+run_case "#973: jq broken, JSON-escaped-tab NON-merge command -> stays a no-op" 0 "" "$sb" \
+  "$tab_nonmerge_cmd"
+
+echo ""
+echo "=== test_block_merge_on_red_ci: $PASS passed, $FAIL failed ==="
+if [ "$FAIL" -gt 0 ]; then
+  echo "Failed cases: $FAILED_CASES" >&2
+  exit 1
+fi
+exit 0

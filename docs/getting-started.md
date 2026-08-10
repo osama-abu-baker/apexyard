@@ -10,6 +10,7 @@ Short version of the setup flow. For the full walkthrough (directory layout, dai
 - [Claude Code](https://claude.com/claude-code) installed
 - [GitHub CLI (`gh`)](https://cli.github.com) installed (optional but recommended)
 - [`jq`](https://jqlang.org/download/) installed — required. Framework hooks use jq to read `.claude/project-config.json` overrides; without it your overrides silently no-op. `brew install jq` / `apt-get install jq` / `dnf install jq` depending on platform. `/setup` refuses to run without it, and a SessionStart banner surfaces the gap if jq disappears later. See [AgDR-0038](agdr/AgDR-0038-jq-as-hard-dependency.md) for the rationale.
+- **Windows**: [Git for Windows](https://gitforwindows.org) (which bundles Git Bash) or WSL — required. `.claude/hooks/*.sh` are bash scripts; native `cmd.exe`/PowerShell can't run them. This already works today (the ancestor-directory-walk hang some Windows users hit on `C:`-drive paths was fixed in [#691](https://github.com/me2resh/apexyard/issues/691)) — this is just making the requirement explicit, same shape as the `jq` line above.
 - Basic familiarity with Claude Code's `CLAUDE.md` system
 
 ---
@@ -136,27 +137,25 @@ Create an AgDR.
 
 ---
 
-## Optional: Terminal push hook (`core.hooksPath`)
+## Terminal push hook (`core.hooksPath`)
 
-The framework ships a `.githooks/pre-push` hook that runs the same check set as the Claude Code `pre-push-gate.sh` hook — markdownlint, shellcheck, site-counts drift, and subpack extraction smoke test — for terminal `git push` commands.
+The framework ships a `.githooks/pre-push` hook that runs the same check set as the Claude Code `pre-push-gate.sh` hook — markdownlint, shellcheck, and the subpack extraction smoke test — for terminal `git push` commands.
 
 The Claude Code hook (`pre-push-gate.sh`) only fires on pushes made _through Claude Code_. The git hook covers pushes made directly from the terminal.
 
-### One-time opt-in per clone
+### Installed automatically by `/setup`
+
+As of me2resh/apexyard#1086, `/setup` runs `bin/install-git-hooks.sh` for you, so a fresh ops-fork clone that's been through `/setup` already has `core.hooksPath` pointing at `.githooks`. A `check-git-hooks-installed.sh` SessionStart advisory also warns — same non-blocking shape as `check-upstream-drift.sh` — if a clone's `core.hooksPath` is unset, stale (points at a deleted directory), or a leftover pointer into a different clone's `.git/hooks`.
+
+If you skipped `/setup`, or want to run it by hand:
 
 ```bash
-git config core.hooksPath .githooks
+bash bin/install-git-hooks.sh
 ```
 
-Run this once inside your apexyard clone. Git then picks up `.githooks/pre-push` on every `git push` regardless of how you invoke it.
+Idempotent — safe to re-run. Repairs the stale-pointer cases above automatically; refuses to overwrite a `core.hooksPath` you set to something else on purpose unless you pass `--force`. See `bash bin/install-git-hooks.sh --help`.
 
-To enable it globally for all clones of apexyard (useful if you work across multiple machines or re-clone often):
-
-```bash
-git config --global core.hooksPath .githooks
-```
-
-Note: `--global` affects every git repo on your machine, not just apexyard. If other repos ship their own hooks under `.git/hooks/`, those will be shadowed. The safest approach is per-clone.
+`core.hooksPath` is per-clone git config (never committed), so this needs to run once per clone — that's exactly why `/setup` calls it for the ops fork rather than leaving it as a one-time manual step to remember. **`/handover` deliberately does NOT call it** against a freshly-cloned managed-project workspace: the installer's only gate is "does a `.githooks/` directory exist," with no provenance check, so pointing it at an arbitrary just-cloned third-party repo hands *that repo's own* committed hook scripts execution on the very next ordinary git operation — no push required (confirmed HIGH finding, PR #1087 security review). See the "1.5-clone" step in `.claude/skills/handover/SKILL.md` for the full rationale, and me2resh/apexyard#1088 for the open follow-up on giving a managed-project clone's own terminal pushes protection without this risk. `--global` also works (`git config --global core.hooksPath .githooks`) if you want every clone on a machine covered at once, but note it affects every git repo on that machine, not just apexyard — if other repos ship their own hooks under `.git/hooks/`, those get shadowed. Per-clone (what the installer does by default) is the safer default.
 
 ### Missing tools degrade gracefully
 
@@ -177,10 +176,20 @@ git commit --amend -m "$(git log -1 --format=%B)
 |-------|----------------|---------------|
 | `markdownlint` | Malformed markdown (broken tables, duplicate headings, etc.) via markdownlint-cli2 | `npx` (Node.js) |
 | `shellcheck` | Shell-script bugs, quoting issues, portability problems in `.claude/hooks/*.sh` | `shellcheck` |
-| `site-counts` | Count drift between `site/*.html` claims and actual on-disk skill/hook/role counts | none (bash) |
+| ~~`site-counts`~~ | Retired — the marketing site moved to me2resh/apexyard-site (#663) | — |
 | `subpacks` | Marketplace sub-pack extraction smoke test — confirms no framework-private files leaked | none (bash) |
 
 Link-check (lychee) is intentionally excluded — it is slow and network-dependent, making it unsuitable for pre-push latency.
+
+---
+
+## Managing model cost — why the main agent dominates spend
+
+The per-agent model matrix ([AgDR-0050](agdr/AgDR-0050-agent-runtime-overhaul.md)) only applies to *spawned* sub-agents (reviews, QA, analysts). *In-flow* work — implementation, PM, design — is adopted **in-thread** by design, so it runs on your primary tier (usually Opus) and the `sonnet` implementation default never takes effect. That's why operators see the main agent dominating token spend.
+
+Three levers manage it, ordered by effort-to-win ratio: (1) **`opusplan`** — Opus plans, Sonnet executes (biggest win, no framework change); (2) the **thin-orchestrator pattern** — keep the Opus loop as a planner / coordinator and delegate implementation to spawned `sonnet` build agents via `/fan-out` or `Workflow`; (3) populate **`agent-routing.yaml`** to pin or route per-agent tiers.
+
+Full explanation + the opt-in thin-orchestrator mode: [`docs/orchestrator-cost-model.md`](orchestrator-cost-model.md).
 
 ---
 
@@ -313,6 +322,19 @@ Cargo workspaces with many crates have a slow first index — see the caveat bel
 - **Cross-project portfolio queries still need grep.** LSP indexes one project at a time. Skills that walk the whole portfolio (`/inbox`, `/tasks`, `/stakeholder-update`, anything that aggregates across `apexyard.projects.yaml`) read across many repos and stay on grep + Read regardless of LSP state.
 - **No new failure mode.** Skills that benefit from LSP (`/code-review`, `/threat-model`, `/security-review`) fall back to grep + Read transparently when LSP is absent. There is no "broken without LSP" path — only a faster one with it.
 - **Plugin marketplace links may move.** The plugin ecosystem is young. If a marketplace search turns up multiple options for one language, prefer the one maintained by the language's own community (e.g. official `tsserver` over a third-party wrapper).
+
+## Optional: Fallow static analysis (JS/TS)
+
+For JavaScript / TypeScript projects, the Code Reviewer agent (Rex) can run a [Fallow](https://docs.fallow.tools) static-analysis pass as part of every code review — surfacing dead code, unused exports/dependencies, duplication, circular dependencies, and complexity hotspots in the **changed code**, plus a dry-run preview of the fixes it would apply. See `.claude/agents/code-reviewer.md` § 9 and [AgDR-0069](agdr/AgDR-0069-fallow-in-code-review.md).
+
+**This is opt-in and fail-soft.** Rex only runs it when the diff touches `**/*.{js,jsx,mjs,cjs,ts,tsx}` AND the `fallow` CLI is on `PATH`. If the CLI is absent, the step is skipped silently — there is no "broken without fallow" path, only a richer review with it. Findings are **advisory** (`nit:` / `suggestion:`); they never flip a verdict on their own, and the review only previews fixes (`fallow fix --dry-run`) — it never mutates your tree.
+
+To enable it on a JS/TS project:
+
+1. **Install the `fallow` CLI** — `cargo install fallow-cli`, or run it ad-hoc with `npx fallow`.
+2. **(Optional) toggle it in `onboarding.yaml`** — set `quality.fallow_review: false` to keep the CLI installed but disable the review pass. Absent or `true` → enabled when the CLI is present.
+
+Non-JS/TS stacks need do nothing — the language gate means the pass never fires on a non-JS/TS diff regardless of the flag, and an absent `fallow` CLI skips it anyway. (Leaving `quality.fallow_review` unset is equivalent to `true`; it only matters on JS/TS projects that have the CLI installed and want to turn the pass *off*.)
 
 ## Optional: Local agent routing
 
