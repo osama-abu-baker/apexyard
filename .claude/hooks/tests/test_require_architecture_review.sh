@@ -219,6 +219,151 @@ assert_eq "cross-repo: correct repo marker allows gate (#485)" "0" "$code"
 rm -rf "$sb"
 
 echo ""
+echo "D) #687 split-portfolio no---repo merge — repo recovered from the cd-target"
+
+# A sibling portfolio repo: its own git tree whose origin is the portfolio slug.
+# The merge command is `cd <portfolio> && gh pr merge <N>` with NO --repo — so
+# the hook must recover the repo from the cd-target's origin (pr_cmd_cd_target +
+# git_origin_repo), set --repo on the diff, AND key the marker on that slug.
+make_portfolio() {
+  local slug="$1" p
+  p=$(mktemp -d)
+  git -C "$p" init -q
+  git -C "$p" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$p" remote add origin "git@github.com:${slug}.git"
+  echo "$p"
+}
+
+# Repo-aware mock gh: answers ONLY when the call carries `--repo <portfolio>`
+# (or the api `repos/<portfolio>/` path). A BARE call (no --repo) models gh
+# resolving against the ops-fork cwd, which does NOT have this PR → empty output.
+# That empty output is exactly what makes the PRE-#687 hook silent-bypass; these
+# cases therefore fail against the old hook and pass against the fixed one.
+install_mock_gh_splitportfolio() {
+  local sb="$1" diff_files="$2" head_sha="$3" portfolio="$4"
+  mkdir -p "$sb/bin"
+  cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+args="\$*"
+case "\$args" in
+  *"--repo $portfolio"*|*"repos/$portfolio/"*)
+    case "\$args" in
+      *"pr diff"*"--name-only"*) printf '%s\n' $diff_files ;;
+      *"pr view"*headRefOid*)    printf '%s\n' "$head_sha" ;;
+      *"pr view"*headRepository*) printf '%s\n' "$portfolio" ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *"pr diff"*"--name-only"*) ;;    # bare → no files (ops-fork resolution)
+  *"pr view"*headRefOid*) ;;        # bare → empty
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/gh"
+}
+
+PF_SLUG="me2resh/portfolio-x"
+
+echo ""
+echo "D) no---repo cd-target + design PR + NO marker -> BLOCK (was a silent-bypass pre-#687)"
+sb=$(make_sandbox); pf=$(make_portfolio "$PF_SLUG")
+install_mock_gh_splitportfolio "$sb" '"projects/foo/docs/technical-design-x.md"' "$SHA" "$PF_SLUG"
+code=$(run_gate "$sb" "cd $pf && gh pr merge 77 --squash")
+assert_eq "#687 cd-target: blocks without marker" "2" "$code"
+rm -rf "$sb" "$pf"
+
+echo ""
+echo "D) ROUND-TRIP: no---repo cd-target + marker under the PORTFOLIO qualifier -> ALLOW"
+sb=$(make_sandbox); pf=$(make_portfolio "$PF_SLUG")
+install_mock_gh_splitportfolio "$sb" '"projects/foo/docs/technical-design-x.md"' "$SHA" "$PF_SLUG"
+# The fixed write side keys the marker on the portfolio slug — prove the fixed
+# read side finds it (the symmetry the #687 warning section demands).
+printf '%s\n' "$SHA" > "$(review_marker_path "$PF_SLUG" 77 architecture "$sb")"
+code=$(run_gate "$sb" "cd $pf && gh pr merge 77 --squash")
+assert_eq "#687 round-trip: portfolio-qualified marker allows gate" "0" "$code"
+rm -rf "$sb" "$pf"
+
+echo ""
+echo "D) negative: marker under the WRONG (ops-fork) qualifier -> BLOCK (qualifier is load-bearing)"
+sb=$(make_sandbox); pf=$(make_portfolio "$PF_SLUG")
+install_mock_gh_splitportfolio "$sb" '"projects/foo/docs/technical-design-x.md"' "$SHA" "$PF_SLUG"
+printf '%s\n' "$SHA" > "$(review_marker_path "me2resh/ops-fork" 77 architecture "$sb")"
+code=$(run_gate "$sb" "cd $pf && gh pr merge 77 --squash")
+assert_eq "#687 wrong-qualifier marker still blocks" "2" "$code"
+rm -rf "$sb" "$pf"
+
+echo ""
+echo "E) #1091/#1099 sibling: forge HEAD unresolvable -> the gate must FAIL CLOSED"
+#
+# require-architecture-review.sh carried the SAME local-HEAD fallback that
+# block-unreviewed-merge.sh had (see #1091, fixed for all three gates by
+# #1098, which shipped a regression test only for block-unreviewed-merge.sh).
+# This is the missing discriminating case for THIS gate (#1099), built on the
+# exact construction from test_block_unreviewed_merge.sh's #1091 case
+# (~line 832): the mock gh answers `pr diff` (a design artifact is found)
+# and `pr view ... headRepository`, but FAILS `pr view ... headRefOid` — the
+# one call resolve_pr_head makes. `headRefName` is also wired to answer even
+# though this hook never queries it, mirroring the sibling gate's mock so the
+# "forge reachable but this ONE field is missing" shape is explicit rather
+# than "the whole gh binary is gone".
+#
+# DISCRIMINATING BY CONSTRUCTION: the marker is written to match THIS
+# sandbox's LOCAL HEAD (`git rev-parse HEAD`) — the value the pre-#1098
+# fallback would have substituted for the unresolvable forge HEAD. Under the
+# removed fallback that makes the SHA comparison succeed and the merge
+# ALLOWED (rc=0). Under fail-closed it is BLOCKED (rc=2) regardless of what
+# the local HEAD says. A marker at a MISMATCHING local HEAD would block both
+# before and after, proving nothing — the exact trap #1099's own issue body
+# calls out.
+
+install_mock_gh_headrefoid_fails() {
+  local sb="$1" diff_files="$2" repo="${3:-o/r}"
+  mkdir -p "$sb/bin"
+  cat > "$sb/bin/gh" <<EOF
+#!/bin/bash
+args="\$*"
+case "\$args" in
+  *"pr diff"*"--name-only"*)
+    printf '%s\n' $diff_files
+    ;;
+  *"pr view"*headRefOid*)
+    exit 1
+    ;;
+  *"pr view"*headRefName*)
+    printf '%s\n' "feature/GH-99-test"
+    ;;
+  *"pr view"*headRepository*)
+    printf '%s\n' "$repo"
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$sb/bin/gh"
+}
+
+sb=$(make_sandbox)
+install_mock_gh_headrefoid_fails "$sb" '"projects/foo/docs/technical-design-x.md"'
+# The sandbox's local HEAD — the value the OLD fallback would have used.
+local_head=$(cd "$sb" && git rev-parse HEAD 2>/dev/null)
+# Marker written to MATCH that local HEAD: the setup most favourable to a
+# bypass, where every comparison passes under the old code.
+printf '%s\n' "$local_head" > "$(review_marker_path "o/r" 77 architecture "$sb")"
+code=$(run_gate "$sb" "gh pr merge 77 --repo o/r --squash")
+assert_eq "#1091: forge HEAD unresolvable + marker matching LOCAL head -> BLOCKED" "2" "$code"
+rm -rf "$sb"
+
+echo ""
+echo "E) #1091/#1099 control: forge healthy, marker at forge HEAD -> still ALLOWED"
+# Guards against over-blocking: proves the fail-closed change didn't also
+# start blocking the ordinary healthy-forge path.
+sb=$(make_sandbox)
+install_mock_gh "$sb" '"projects/foo/docs/technical-design-x.md"' "$SHA"
+printf '%s\n' "$SHA" > "$(review_marker_path "o/r" 77 architecture "$sb")"
+code=$(run_gate "$sb" "gh pr merge 77 --repo o/r --squash")
+assert_eq "#1091 control: gh healthy, marker at forge HEAD -> still ALLOWED" "0" "$code"
+rm -rf "$sb"
+
+echo ""
 echo "==================================="
 echo "  PASS: $PASS   FAIL: $FAIL"
 echo "==================================="

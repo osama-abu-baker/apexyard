@@ -29,9 +29,52 @@
 
 set -u
 
+# SELF-LOCATION BOOTSTRAP (me2resh/apexyard#1102 / #1126, AgDR-0118)
+# ------------------------------------------------------------
+# Was two separate unanchored self-location sites in this file:
+#   . "$(dirname "${BASH_SOURCE[0]}")/_lib-read-config.sh" 2>/dev/null || true
+#   ops_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+# Neither guarded against an unset/empty BASH_SOURCE[0] (non-bash shell),
+# which makes `dirname ""` resolve to ".", silently substituting the
+# caller's cwd for this file's real location. Resolved ONCE here and
+# reused by both downstream sites so they can't drift. The bootstrap
+# guard (raw BASH_SOURCE[0] captured once, empty short-circuits to no
+# self-location) plus `resolve_anchored_lib_dir` in _lib-ops-root.sh (the
+# anchor check) are the ONE shared idiom every _lib-*.sh / hook
+# self-location site now uses -- see that function's header for why the
+# very first hop can never itself be centralized behind a sourced call.
+RAW_BASH_SOURCE_0="${BASH_SOURCE[0]:-}"
+HOOK_DIR=""
+if [ -n "$RAW_BASH_SOURCE_0" ]; then
+  _CANDIDATE_DIR="$(cd "$(dirname "$RAW_BASH_SOURCE_0")" 2>/dev/null && pwd)"
+else
+  _CANDIDATE_DIR=""
+fi
+if [ -n "$_CANDIDATE_DIR" ] && [ -f "$_CANDIDATE_DIR/_lib-ops-root.sh" ]; then
+  # shellcheck source=./_lib-ops-root.sh
+  # shellcheck disable=SC1091
+  . "$_CANDIDATE_DIR/_lib-ops-root.sh"
+  if command -v resolve_anchored_lib_dir >/dev/null 2>&1; then
+    HOOK_DIR="$(resolve_anchored_lib_dir "$RAW_BASH_SOURCE_0")"
+  fi
+fi
+unset _CANDIDATE_DIR
+
+if [ -n "$HOOK_DIR" ]; then
+  # shellcheck source=/dev/null
+  . "$HOOK_DIR/_lib-read-config.sh" 2>/dev/null || true
+fi
+
 INPUT=$(cat)
 
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
+
+# Gate mode (#651): only the Bash exploratory-search branch is gate-eligible;
+# Read/Glob/Grep stay advisory-only so read→edit is never blocked. `escape`
+# is the per-call/operator opt-out that lets a search proceed when MCP can't
+# serve it (empty index, non-indexable repo, stale index).
+gate_eligible=false
+escape=false
 
 # ---------------------------------------------------------------------------
 # Branch on tool type. Bash uses the original grep/find command scanner.
@@ -101,6 +144,14 @@ if [ "$TOOL_NAME" = "Bash" ]; then
 
   $targets_framework || exit 0
 
+  # This Bash exploratory search over indexed paths is gate-eligible (#651).
+  gate_eligible=true
+  # Escape hatch: a real env var (operator/session) OR the per-call token in
+  # the command itself (`APEXYARD_MCP_FALLBACK=1 grep …` on a retry).
+  if [ "${APEXYARD_MCP_FALLBACK:-}" = "1" ] || printf '%s' "$COMMAND" | grep -q 'APEXYARD_MCP_FALLBACK=1'; then
+    escape=true
+  fi
+
 else
   # -------------------------------------------------------------------------
   # READ / GLOB / GREP BRANCH (#489): fire when the target path is inside a
@@ -131,7 +182,13 @@ fi
 # stay silent — the adopter doesn't have the premium search component, so the
 # nudge would be noise. (#469)
 
-ops_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+# Reuses the anchored HOOK_DIR resolved at the top of this file (the
+# bootstrap self-location for _lib-read-config.sh) rather than
+# re-deriving it from BASH_SOURCE a second time here.
+ops_root=""
+if [ -n "$HOOK_DIR" ]; then
+  ops_root="$(cd "$HOOK_DIR/../.." 2>/dev/null && pwd)"
+fi
 
 mcp_has_search=false
 for mcp_json in "$ops_root/.mcp.json" "${APEXYARD_PORTFOLIO_ROOT:-}/.mcp.json"; do
@@ -143,6 +200,33 @@ for mcp_json in "$ops_root/.mcp.json" "${APEXYARD_PORTFOLIO_ROOT:-}/.mcp.json"; 
 done
 
 $mcp_has_search || exit 0
+
+# --- Gate mode (#651): opt-in soft-block before the advisory ----------------
+# When `mcp_search.gate_mode` is true AND this is a gate-eligible Bash search
+# AND the escape hatch isn't set, soft-block (exit 2) and instruct MCP-first.
+# Default-off, so this is a no-op for everyone who hasn't opted in. AgDR-0070.
+
+GATE_MODE=$(config_get_or '.mcp_search.gate_mode' 'false' 2>/dev/null || echo false)
+
+if $gate_eligible && [ "$GATE_MODE" = "true" ] && ! $escape; then
+  cat >&2 <<'EOF'
+BLOCKED (mcp_search.gate_mode): use the apexyard-search MCP index first.
+
+This is an exploratory grep/find over indexed framework/project paths. Run
+  mcp__apexyard-search__search_code   (managed-project codebases)
+  mcp__apexyard-search__search_docs   (framework docs)
+instead — semantic, targeted excerpts, ~3-5x fewer tokens. Load via
+  ToolSearch("select:mcp__apexyard-search__search_code,mcp__apexyard-search__search_docs").
+
+If MCP already returned nothing (empty/stale index, or a non-indexable repo),
+retry the exact command with the escape hatch prefix:
+  APEXYARD_MCP_FALLBACK=1 <your command>
+
+(Gate mode is opt-in via .claude/project-config.json → mcp_search.gate_mode.
+ Read/Glob/Grep are never blocked — only exploratory shell search.)
+EOF
+  exit 2
+fi
 
 # --- Emit advisory as additionalContext on stdout (non-blocking) -----------
 

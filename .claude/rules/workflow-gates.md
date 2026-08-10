@@ -52,6 +52,18 @@ The list lives at `.claude/project-config.defaults.json` → `ticket.bootstrap_s
 
 **Mechanism:** each bootstrap skill writes its name to `.claude/session/active-bootstrap` on entry and removes the file on completion. The hook reads the marker and exempts skills on the configured list. The `clear-bootstrap-marker.sh` SessionStart hook sweeps stale markers from interrupted sessions so a crashed / killed skill can't leave the exemption open forever.
 
+### Out-of-repo exemption (apexyard#883)
+
+The pre-build gate exists to protect **governed content** — the ops fork itself and every registered `workspace/<project>` clone. A write target entirely outside those trees, and not inside any git repository at all (a home dotfile like `~/.zshrc`, `/etc`-style machine config, `/tmp` scratch files), is outside the gate's jurisdiction: there is nothing here for a ticket to track, and on a fork with GitHub Issues disabled there would otherwise be no legitimate way to satisfy the gate for routine machine setup.
+
+`require-active-ticket.sh` resolves the write target's real (symlink-free) path and exempts it only when **all three** of the following hold:
+
+- outside the ops fork
+- outside every registered `workspace/<project>`
+- not inside any git repository at all
+
+This is deliberately narrower than "not inside a *registered* repo" — being inside some unrelated, unregistered git repository does **not** exempt a write; only a target with no git repository anywhere in its ancestry qualifies. Symlinks are resolved before judging, so a symlink under `$HOME` that points into a governed tree cannot be used to slip a write past the gate. An unresolvable or ambiguous target (an unextractable Bash write-target, in particular) is never exempted here — it falls straight through to the ticket gate, unchanged. See `require-active-ticket.sh`'s "Out-of-governance exemption" comment block for the full fail-closed reasoning, and `.claude/hooks/tests/test_require_active_ticket_bash.sh` cases 31–38 for the test coverage.
+
 See AgDR-0011 + me2resh/apexyard#150 for the full design rationale.
 
 ## Migration Gate (3a) — dedicated ticket + AgDR
@@ -98,6 +110,8 @@ Default design-artifact patterns (configurable via `.claude/project-config.json`
 
 Spike tickets (prefix `[Spike]`, label `spike`) are hypothesis-driven, time-boxed, throw-away exploration. The full production SDLC is the wrong bar — author avoidance is the failure mode. The exemption set below is **surgical, not blanket**:
 
+> **Prototype work shares this exemption.** Prototype tickets (prefix `[Prototype]`, label `prototype`, branch `prototype/...`, PR type `prototype(...)`) are the throw-away **UX/demo** sibling of spikes — same disposable lifecycle, different question ("what should it look/feel like?" vs "will it work?"). The AgDR + coverage exemptions in the table below apply to prototype work identically; substitute `/prototype` for `/spike` and `/prototype-close` for `/spike-close`. The **walking skeleton** (`/walking-skeleton`) is the deliberate opposite — a **kept** thin end-to-end slice held to the FULL SDLC with **no** exemptions. See `.claude/skills/{spike,prototype,walking-skeleton}/SKILL.md`.
+
 | Gate | Production work | Spike work |
 |------|----------------|------------|
 | Pre-Build (parent epic, story tickets, ACs, design review) | Required | Skipped — the spike ticket IS the unit |
@@ -109,13 +123,13 @@ Spike tickets (prefix `[Spike]`, label `spike`) are hypothesis-driven, time-boxe
 | QA Engineer verification | Required (AC verification) | **Required** (Hypothesis verification: did we answer the question?) |
 | Disposition decision before close | N/A | **Required** — operator must declare PROMOTE or DISCARD via `/spike-close` |
 
-**Detection.** AgDR-required hooks detect a spike PR via:
+**Detection.** AgDR-required hooks detect a spike (or prototype) PR via:
 
-1. PR title carries `spike(...)` as the conventional-commit type
-2. Active ticket marker references a `[Spike]`-prefixed ticket
-3. Branch name starts with `spike/`
+1. PR title carries `spike(...)` or `prototype(...)` as the conventional-commit type
+2. Active ticket marker references a `[Spike]`- or `[Prototype]`-prefixed ticket
+3. Branch name starts with `spike/` or `prototype/`
 
-Any one match exempts the gate; otherwise the production rule applies. See `.claude/skills/spike/SKILL.md`, `.claude/skills/spike-close/SKILL.md`, and `docs/agdr/AgDR-0017-spike-skill-schema-and-exemptions.md`.
+Any one match exempts the gate; otherwise the production rule applies. See `.claude/skills/spike/SKILL.md`, `.claude/skills/spike-close/SKILL.md`, `.claude/skills/prototype/SKILL.md`, `.claude/skills/prototype-close/SKILL.md`, and `docs/agdr/AgDR-0017-spike-skill-schema-and-exemptions.md`.
 
 ## QA State is Mandatory
 

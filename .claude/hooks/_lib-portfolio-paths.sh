@@ -42,7 +42,42 @@
 #   agent_routing → ./agent-routing.yaml        (#351, may not exist)
 #
 # Caching: results cached per-process in shell vars to avoid repeat jq
-# calls. Same pattern as _CONFIG_CACHE in _lib-read-config.sh.
+# calls. Same pattern as _CONFIG_CACHE in _lib-read-config.sh. On top of
+# that, each resolver ALSO consults a session-scoped, CROSS-PROCESS cache
+# (me2resh/apexyard#1013 / AgDR-0120) via
+# _portfolio_resolve_with_session_cache — see that function and
+# _lib-resolution-cache.sh's header for the full design. Falls through to
+# the unchanged per-process logic on any miss; never changes what gets
+# computed, only how often.
+
+# ------------------------------------------------------------------------------
+# Load _lib-ops-root.sh (for resolve_ops_root, consulted by _portfolio_root
+# below) and the shared resolution-cache helpers (me2resh/apexyard#1013),
+# if available, so the portfolio_* resolvers can consult the session-scoped
+# cross-process cache. Best-effort: on any self-location failure this
+# simply leaves the relevant functions undefined, and every call site below
+# already treats "helper not defined" as "compute fresh, exactly as before
+# this file existed" — see _portfolio_root and
+# _portfolio_resolve_with_session_cache.
+# ------------------------------------------------------------------------------
+if ! command -v resolve_ops_root >/dev/null 2>&1 || ! command -v _resolution_cache_current_fingerprint >/dev/null 2>&1; then
+  _PORTFOLIO_PATHS_RAW_BASH_SOURCE_0="${BASH_SOURCE[0]:-}"
+  if [ -n "$_PORTFOLIO_PATHS_RAW_BASH_SOURCE_0" ]; then
+    _portfolio_paths_lib_dir="$(cd "$(dirname "$_PORTFOLIO_PATHS_RAW_BASH_SOURCE_0")" 2>/dev/null && pwd)"
+    if [ -n "$_portfolio_paths_lib_dir" ]; then
+      if ! command -v resolve_ops_root >/dev/null 2>&1 && [ -f "$_portfolio_paths_lib_dir/_lib-ops-root.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_portfolio_paths_lib_dir/_lib-ops-root.sh"
+      fi
+      if ! command -v _resolution_cache_current_fingerprint >/dev/null 2>&1 && [ -f "$_portfolio_paths_lib_dir/_lib-resolution-cache.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_portfolio_paths_lib_dir/_lib-resolution-cache.sh"
+      fi
+    fi
+    unset _portfolio_paths_lib_dir
+  fi
+  unset _PORTFOLIO_PATHS_RAW_BASH_SOURCE_0
+fi
 
 # ------------------------------------------------------------------------------
 # Internal: resolve the ops-fork root. Walks up from the git toplevel
@@ -64,6 +99,32 @@ _portfolio_root() {
     return 0
   fi
 
+  # Prefer the shared, pin-aware resolver when available
+  # (me2resh/apexyard#1013): resolve_ops_root() already has its own
+  # cross-process cache (the ops-root-<session> pin, #381), so consulting
+  # it here avoids redoing the walk-up below on every process when a pin
+  # already answers the question. This is a consolidation, not a second
+  # resolver — same anchor conditions as the walk below, so it can only
+  # agree with what that walk would have found, never diverge from it
+  # (the exact "two hand-maintained resolvers disagree" failure mode this
+  # issue's own "Related" section warns about, apexyard-premium#537).
+  #
+  # Deliberately does NOT short-circuit on a resolve_ops_root() MISS:
+  # unlike resolve_ops_root() (which returns empty when no anchor is
+  # found above $start), _portfolio_root()'s own contract falls back to
+  # the git toplevel itself for un-anchored managed-project clones (see
+  # below) — a real, load-bearing behavioural difference this
+  # consolidation must not erase.
+  if command -v resolve_ops_root >/dev/null 2>&1; then
+    local pinned
+    pinned=$(resolve_ops_root "$r")
+    if [ -n "$pinned" ]; then
+      _PORTFOLIO_ROOT_CACHE="$pinned"
+      echo "$pinned"
+      return 0
+    fi
+  fi
+
   local cur="$r"
   while [ -n "$cur" ] && [ "$cur" != "/" ]; do
     # v2 anchor first (cheap presence test).
@@ -78,7 +139,7 @@ _portfolio_root() {
       echo "$cur"
       return 0
     fi
-    cur=$(dirname "$cur")
+    parent=$(dirname "$cur"); [ "$parent" = "$cur" ] && break; cur="$parent"
   done
 
   # Not under an apexyard fork — fall back to git toplevel so callers
@@ -89,25 +150,173 @@ _portfolio_root() {
 }
 
 # ------------------------------------------------------------------------------
+# Internal: canonicalize an ABSOLUTE path to its logical, `/../`-free,
+# symlink-resolved form — WITHOUT requiring the leaf to already exist.
+#
+# Why this exists (me2resh/apexyard#945): callers of the public resolvers
+# below (require-active-ticket.sh, require-migration-ticket.sh) compare a
+# tool-supplied FILE_PATH against e.g. `portfolio_workspace_dir()` via a
+# shell `case "$FILE_PATH" in "$WORKSPACE_DIR"/*)` prefix match. FILE_PATH
+# arrives already normalised (no literal ".." component). Before this fix,
+# a split-portfolio v2 adopter whose `portfolio.workspace_dir` override was
+# a RELATIVE sibling path (e.g. "../<fork>-portfolio/workspace") got a
+# resolved value that still contained a literal "/../" segment — e.g.
+# "/Users/x/apexyard/../apexyard-portfolio/workspace" — because the old
+# `_portfolio_resolve` just string-concatenated `$root/$p` with no
+# normalisation. That literal "/../" never appears in a real FILE_PATH, so
+# the prefix match silently failed and the per-project ticket marker
+# (Tier 0/1) was ignored — legitimate edits got blocked (or fell through
+# to the wrong tier).
+#
+# Algorithm mirrors `_resolve_real_path()` in _lib-path-resolve.sh (moved
+# there from require-active-ticket.sh by PR #1087, Rex finding #4 — see
+# that file's own header comment for why there is now exactly ONE
+# definition instead of near-duplicate copies):
+# walk up to the nearest EXISTING ancestor, physically resolve it via
+# `cd ... && pwd -P` (which both collapses ".." and follows symlinks),
+# then re-append whatever tail doesn't exist yet literally — a tail that
+# doesn't exist yet cannot itself be a symlink or contain an unresolved
+# "..", since dirname/basename already stripped those out of the walked
+# portion. This is the same "realpath -m without depending on GNU
+# coreutils" trick, needed because macOS/BSD doesn't guarantee GNU
+# realpath's -m/-e flags are available.
+#
+# Fails soft: if $p can't be resolved for any reason (cd denied, etc.),
+# echoes the original input unchanged rather than an empty/broken path —
+# unlike require-active-ticket.sh's fail-CLOSED security check, a
+# portfolio path resolver has no "block on doubt" contract to uphold.
+#
+# Windows/MSYS drive-letter normalization (me2resh/apexyard#1018): on
+# Windows Git Bash, `git rev-parse --show-toplevel` (git.exe is a native
+# Windows binary) returns a drive-letter path like "D:/Projs/fork", but
+# `cd ... && pwd -P` (run directly by bash, an MSYS binary) returns the
+# MSYS mount-point form "/d/Projs/fork" for the SAME location. The two
+# spellings are byte-different for one identical path. Before this fix,
+# the `case "$p" in /*)` guard below didn't recognize a drive-letter path
+# as absolute at all, so it hit the `*)` fallback and was returned RAW,
+# un-normalized — while a caller that instead ran `cd "$root" && pwd -P`
+# directly (portfolio_validate's root_real/wd_real) got the MSYS form.
+# Comparing the two forms via a string prefix match then always failed,
+# even for a perfectly valid, non-split single-fork setup.
+#
+# Fix: normalize a leading `<letter>:/` or `<letter>:\` to `/<letter>/`
+# BEFORE the absolute-path check, as a pure string transform — no
+# dependency on cygpath (absent on macOS/Linux) or on cd/pwd actually
+# resolving a real drive letter (which only MSYS's runtime does). This
+# is a no-op for every POSIX path: a real absolute path always starts
+# with "/", never with "<letter>:", so this branch is simply never
+# entered outside a Windows-drive-letter input.
+# ------------------------------------------------------------------------------
+_portfolio_canonicalize() {
+  local p="$1" dir tail=""
+
+  case "$p" in
+    [A-Za-z]:/*|[A-Za-z]:\\*)
+      local drive rest
+      drive="${p%%:*}"
+      rest="${p#*:}"
+      rest="$(printf '%s' "$rest" | tr '\\' '/')"
+      drive="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+      p="/${drive}${rest}"
+      ;;
+  esac
+
+  case "$p" in
+    /*) : ;;
+    *) echo "$p"; return 0 ;;  # not absolute — nothing to canonicalize
+  esac
+
+  dir="$p"
+  while [ -n "$dir" ] && [ "$dir" != "/" ] && [ ! -e "$dir" ]; do
+    if [ -z "$tail" ]; then
+      tail="$(basename "$dir")"
+    else
+      tail="$(basename "$dir")/$tail"
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  if [ ! -e "$dir" ]; then
+    echo "$p"
+    return 0
+  fi
+
+  if [ -d "$dir" ]; then
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)"
+  else
+    # $dir resolved to an existing FILE (not a directory) partway through
+    # the walk — canonicalize its parent and re-append its own basename.
+    local parent
+    parent="$(cd "$(dirname "$dir")" 2>/dev/null && pwd -P)"
+    if [ -n "$parent" ]; then
+      dir="$parent/$(basename "$dir")"
+    else
+      dir=""
+    fi
+  fi
+
+  if [ -z "$dir" ]; then
+    echo "$p"
+    return 0
+  fi
+
+  if [ -n "$tail" ]; then
+    if [ "$dir" = "/" ]; then
+      printf '%s%s' "$dir" "$tail"
+    else
+      printf '%s/%s' "$dir" "$tail"
+    fi
+  else
+    printf '%s' "$dir"
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Internal: resolve a possibly-relative path against the ops-fork root.
-# Outputs an absolute path. If the input is already absolute, echo as-is.
+# Outputs an absolute, canonical (symlink-free, `/../`-free) path. If the
+# input is already absolute, it is still canonicalized — an absolute
+# override in project-config.json could itself carry a relative segment
+# (e.g. "$SIBLING/../other").
+#
+# Absoluteness has TWO spellings, not one (me2resh/apexyard#1034). #1029
+# taught `_portfolio_canonicalize` (below) to normalize a Windows
+# drive-letter prefix, but left this function's own test as a bare `/*)`.
+# A drive-letter path IS absolute and does NOT start with "/", so it fell
+# into the relative arm and got concatenated onto the ops-fork root:
+#
+#   .portfolio.registry: "D:/Portfolio/apexyard.projects.yaml"
+#     -> /Users/fork/D:/Portfolio/apexyard.projects.yaml
+#
+# The drive-letter arm below mirrors the pattern `_portfolio_canonicalize`
+# already uses, so the two functions now agree on what "absolute" means.
+#
+# Deliberately NOT matched: drive-RELATIVE spellings (`C:foo`, bare `C:`).
+# `C:foo` means "foo, relative to the current directory ON drive C" — it is
+# genuinely not absolute, and treating it as such would resolve it somewhere
+# the caller never asked for. The `[/\\]` after the colon is what draws that
+# line, and it is load-bearing: do not relax it to a bare `[A-Za-z]:*)`.
+# Pinned by the drive-relative case in
+# tests/test_portfolio_paths_windows_drive_letter.sh.
 # ------------------------------------------------------------------------------
 _portfolio_resolve() {
-  local p="$1"
+  local p="$1" abs
   case "$p" in
-    /*) echo "$p" ;;
+    /*) abs="$p" ;;
+    [A-Za-z]:/*|[A-Za-z]:\\*) abs="$p" ;;
     *)
       local root
       root=$(_portfolio_root)
       if [ -n "$root" ]; then
         # Strip leading ./ for tidier output.
-        echo "$root/${p#./}"
+        abs="$root/${p#./}"
       else
         # No root — return the literal so caller can detect.
         echo "$p"
+        return 0
       fi
       ;;
   esac
+  _portfolio_canonicalize "$abs"
 }
 
 # ------------------------------------------------------------------------------
@@ -135,8 +344,58 @@ _portfolio_get() {
 }
 
 # ------------------------------------------------------------------------------
+# Internal: shared session-cache-aware resolution (me2resh/apexyard#1013 /
+# AgDR-0120). Every portfolio_* resolver below RESOLVES to a value that
+# depends on (config, ops root), but the fingerprint that governs the
+# cache's validity — the SAME one _lib-read-config.sh's merged config
+# cache uses — tracks only config (project-config.defaults.json +
+# project-config.json). The ops root is deliberately NOT a fingerprint
+# input (me2resh/apexyard#1013 follow-up, F2): it cannot change within a
+# session (resolve_ops_root(), #381, pins it once per
+# $CLAUDE_CODE_SESSION_ID), and every cache file this library writes is
+# already scoped into its filename by that same session id — so there is
+# no within-session root change for a fingerprint component to guard
+# against. See _lib-resolution-cache.sh's _resolution_cache_config_fingerprint
+# for the full writeup. One shared implementation tries the session cache
+# first, falling through to the existing _portfolio_get + _portfolio_resolve
+# chain (unchanged) on any miss. Callers store the result in THEIR OWN
+# per-process _PORTFOLIO_*_CACHE var, exactly as before — this only changes
+# HOW a per-process cache miss gets computed, never what gets computed or
+# how a per-process HIT is served.
+#
+# <cache_name> is a short, hardcoded literal used as the session cache
+# file's suffix (see _lib-resolution-cache.sh's _resolution_cache_file) —
+# never derived from tool input.
+# ------------------------------------------------------------------------------
+_portfolio_resolve_with_session_cache() {
+  local cache_name="$1" config_key="$2" default="$3"
+
+  local fp cached
+  if command -v _resolution_cache_current_fingerprint >/dev/null 2>&1; then
+    fp=$(_resolution_cache_current_fingerprint)
+    if [ "$fp" != "UNKNOWN" ]; then
+      if cached=$(_resolution_cache_read "$cache_name" "$fp" 2>/dev/null) && [ -n "$cached" ]; then
+        printf '%s' "$cached"
+        return 0
+      fi
+    fi
+  fi
+
+  local raw resolved
+  raw=$(_portfolio_get "$config_key" "$default")
+  resolved=$(_portfolio_resolve "$raw")
+
+  if [ -n "${fp:-}" ] && [ "$fp" != "UNKNOWN" ]; then
+    _resolution_cache_write "$cache_name" "$fp" "$resolved" 2>/dev/null || true
+  fi
+
+  printf '%s' "$resolved"
+}
+
+# ------------------------------------------------------------------------------
 # Public resolvers — each outputs an absolute path.
-# Cached per-process.
+# Cached per-process, and (me2resh/apexyard#1013) cross-process via
+# _portfolio_resolve_with_session_cache above.
 # ------------------------------------------------------------------------------
 _PORTFOLIO_REGISTRY_CACHE=""
 portfolio_registry() {
@@ -144,9 +403,7 @@ portfolio_registry() {
     echo "$_PORTFOLIO_REGISTRY_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.registry' './apexyard.projects.yaml')
-  _PORTFOLIO_REGISTRY_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_REGISTRY_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-registry" '.portfolio.registry' './apexyard.projects.yaml')
   echo "$_PORTFOLIO_REGISTRY_CACHE"
 }
 
@@ -156,9 +413,7 @@ portfolio_projects_dir() {
     echo "$_PORTFOLIO_PROJECTS_DIR_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.projects_dir' './projects')
-  _PORTFOLIO_PROJECTS_DIR_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_PROJECTS_DIR_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-projects-dir" '.portfolio.projects_dir' './projects')
   echo "$_PORTFOLIO_PROJECTS_DIR_CACHE"
 }
 
@@ -168,9 +423,7 @@ portfolio_ideas_backlog() {
     echo "$_PORTFOLIO_IDEAS_BACKLOG_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.ideas_backlog' './projects/ideas-backlog.md')
-  _PORTFOLIO_IDEAS_BACKLOG_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_IDEAS_BACKLOG_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-ideas-backlog" '.portfolio.ideas_backlog' './projects/ideas-backlog.md')
   echo "$_PORTFOLIO_IDEAS_BACKLOG_CACHE"
 }
 
@@ -188,9 +441,7 @@ portfolio_onboarding_path() {
     echo "$_PORTFOLIO_ONBOARDING_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.onboarding' './onboarding.yaml')
-  _PORTFOLIO_ONBOARDING_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_ONBOARDING_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-onboarding" '.portfolio.onboarding' './onboarding.yaml')
   echo "$_PORTFOLIO_ONBOARDING_CACHE"
 }
 
@@ -209,9 +460,7 @@ portfolio_workspace_dir() {
     echo "$_PORTFOLIO_WORKSPACE_DIR_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.workspace_dir' './workspace')
-  _PORTFOLIO_WORKSPACE_DIR_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_WORKSPACE_DIR_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-workspace-dir" '.portfolio.workspace_dir' './workspace')
   echo "$_PORTFOLIO_WORKSPACE_DIR_CACHE"
 }
 
@@ -235,9 +484,7 @@ portfolio_custom_skills_dir() {
     echo "$_PORTFOLIO_CUSTOM_SKILLS_DIR_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.custom_skills_dir' './custom-skills')
-  _PORTFOLIO_CUSTOM_SKILLS_DIR_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_CUSTOM_SKILLS_DIR_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-custom-skills-dir" '.portfolio.custom_skills_dir' './custom-skills')
   echo "$_PORTFOLIO_CUSTOM_SKILLS_DIR_CACHE"
 }
 
@@ -256,9 +503,7 @@ portfolio_custom_handbooks_dir() {
     echo "$_PORTFOLIO_CUSTOM_HANDBOOKS_DIR_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.custom_handbooks_dir' './custom-handbooks')
-  _PORTFOLIO_CUSTOM_HANDBOOKS_DIR_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_CUSTOM_HANDBOOKS_DIR_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-custom-handbooks-dir" '.portfolio.custom_handbooks_dir' './custom-handbooks')
   echo "$_PORTFOLIO_CUSTOM_HANDBOOKS_DIR_CACHE"
 }
 
@@ -294,10 +539,104 @@ portfolio_agent_routing() {
     echo "$_PORTFOLIO_AGENT_ROUTING_CACHE"
     return 0
   fi
-  local raw
-  raw=$(_portfolio_get '.portfolio.agent_routing' './agent-routing.yaml')
-  _PORTFOLIO_AGENT_ROUTING_CACHE=$(_portfolio_resolve "$raw")
+  _PORTFOLIO_AGENT_ROUTING_CACHE=$(_portfolio_resolve_with_session_cache "portfolio-agent-routing" '.portfolio.agent_routing' './agent-routing.yaml')
   echo "$_PORTFOLIO_AGENT_ROUTING_CACHE"
+}
+
+# ------------------------------------------------------------------------------
+# Public: portfolio_path_eq <a> <b>
+#   Case-insensitive-filesystem-aware equality check for two absolute
+#   paths — do they name the SAME filesystem entry?
+#
+#   Why this exists (me2resh/apexyard#1104): on a case-insensitive
+#   filesystem (macOS/APFS default, Windows), two path strings that
+#   differ only in letter-case can be the identical on-disk directory.
+#   `git rev-parse --show-toplevel` resolves via the OS and always
+#   returns the canonical on-disk case (verified: `git -C
+#   /path/to/lowercase rev-parse --show-toplevel` still returns the
+#   canonical-cased path), but bash's `cd`/`pwd -P` do NOT re-case —
+#   verified empirically: `cd lowercase-path && pwd -P` returns
+#   "lowercase-path" unchanged, not the on-disk canonical case, on both
+#   GNU bash 5.x and macOS's stock `/bin/bash` 3.2. So a path resolved
+#   via `git rev-parse` (canonical) and a path resolved via a raw
+#   `$PWD`-derived string (whatever case the operator or harness
+#   originally typed) can be the SAME directory yet compare unequal with
+#   a plain `=`/`case` string match — which is exactly how a case-only
+#   difference between the ops-fork root and a portfolio path used to
+#   get misread as "two distinct repos" (a phantom split-portfolio /
+#   broken-config banner on a plain single-fork setup).
+#
+#   Strategy: prefer `-ef` (device+inode identity — the POSIX `test`
+#   operator, immune to case entirely) when both paths exist. Fall back
+#   to a case-folded string comparison when one/both don't exist yet
+#   (e.g. a workspace_dir that hasn't been created) — `-ef` needs a
+#   stat(2) on both sides. The fallback intentionally folds case
+#   UNCONDITIONALLY rather than trying to detect "is this filesystem
+#   case-insensitive": a false-positive fold on a case-SENSITIVE
+#   filesystem (treating two genuinely-different directories as equal)
+#   is the rarer, lower-cost failure mode next to the false "split
+#   portfolio" this helper exists to eliminate on every case-insensitive
+#   Mac/Windows setup — and the fold only ever applies to the
+#   non-existent-path fallback, where there is no inode to be wrong
+#   about in the first place.
+# ------------------------------------------------------------------------------
+portfolio_path_eq() {
+  local a="$1" b="$2"
+
+  [ "$a" = "$b" ] && return 0
+
+  if [ -e "$a" ] && [ -e "$b" ] && [ "$a" -ef "$b" ]; then
+    return 0
+  fi
+
+  local a_lc b_lc
+  a_lc=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
+  b_lc=$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]')
+  [ "$a_lc" = "$b_lc" ]
+}
+
+# ------------------------------------------------------------------------------
+# Public: portfolio_path_under <path> <dir>
+#   Case-insensitive-filesystem-aware containment check — is <path> equal
+#   to <dir>, or does it live somewhere under <dir>? The prefix-match
+#   sibling of portfolio_path_eq, for the same reason (see its header
+#   comment above).
+#
+#   Strategy: walk UP from <path> (via dirname) to each ancestor that
+#   actually exists, and -ef-compare it against <dir> — this correctly
+#   handles <path> not existing yet (a file/dir that hasn't been created)
+#   by climbing past the non-existent tail, the same existing-ancestor
+#   pattern _portfolio_canonicalize already uses. Falls back to a
+#   case-folded string prefix match when <dir> itself doesn't exist
+#   (nothing to -ef against) or no existing ancestor of <path> matched.
+# ------------------------------------------------------------------------------
+portfolio_path_under() {
+  local path="$1" dir="$2"
+
+  [ -z "$dir" ] && return 1
+
+  portfolio_path_eq "$path" "$dir" && return 0
+
+  if [ -e "$dir" ]; then
+    local cur="$path"
+    while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+      if [ -e "$cur" ] && [ "$cur" -ef "$dir" ]; then
+        return 0
+      fi
+      local parent
+      parent=$(dirname "$cur")
+      [ "$parent" = "$cur" ] && break
+      cur="$parent"
+    done
+  fi
+
+  local path_lc dir_lc
+  path_lc=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+  dir_lc=$(printf '%s' "$dir" | tr '[:upper:]' '[:lower:]')
+  case "$path_lc" in
+    "$dir_lc"|"$dir_lc"/*) return 0 ;;
+  esac
+  return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -389,11 +728,13 @@ portfolio_validate() {
   root_real=$(cd "$root" 2>/dev/null && pwd -P) || root_real="$root"
   wd_real=$(cd "$workspace_dir" 2>/dev/null && pwd -P) || wd_real="$workspace_dir"
 
+  # Case-insensitive-filesystem-aware containment check (me2resh/apexyard#1104).
+  # A plain string prefix match here misreads a case-only difference (e.g.
+  # $root resolved via git rev-parse's canonical case vs a path built from
+  # a raw, differently-cased cwd) as "outside the fork" — see
+  # portfolio_path_under's header comment for the full mechanism.
   _outside_fork() {
-    case "$1" in
-      "$root_real"|"$root_real"/*) return 1 ;;
-    esac
-    return 0
+    ! portfolio_path_under "$1" "$root_real"
   }
 
   if _outside_fork "$registry" || _outside_fork "$projects_dir"; then
@@ -403,40 +744,71 @@ portfolio_validate() {
     fi
   fi
 
-  case "$onboarding" in
-    "$root"/*|"$root")
-      # In-fork path — leave it to onboarding-check.sh.
-      ;;
-    *)
-      if [ ! -f "$onboarding" ]; then
-        echo "broken: portfolio.onboarding resolved to $onboarding — file does not exist"
-        return 1
-      fi
-      ;;
-  esac
+  # Fork-containment check — see me2resh/apexyard#951 (and #952 for the
+  # false-positive fix below).
+  #
+  # A projects_dir/workspace_dir override that's meant to point at the
+  # sibling portfolio repo but has the wrong `../` depth (or a missing
+  # leading `../`) can resolve to a real, but WRONG, directory INSIDE the
+  # ops fork. The plain existence check earlier in this function passes —
+  # the decoy dir genuinely exists — so the misconfig stays silent and
+  # subsequent writes (clones, docs, registry edits) land in the wrong
+  # tree. Close that gap by resolving each dir to its canonical
+  # (`cd && pwd -P`) form and flagging if it lands inside.
+  #
+  # GATE ON THE RESOLVED LOCATION, NOT on portfolio_is_v2 (#952). Flag only
+  # when a dir resolves INSIDE the ops fork at a NON-DEFAULT location. The
+  # in-fork DEFAULTS ($root/projects, $root/workspace) are correct
+  # single-fork behaviour and must never be flagged; a sibling-intended
+  # override with the wrong `../` depth (or a missing leading `../`) lands
+  # inside the fork at some OTHER path, which is the misconfig #951 catches.
+  #
+  # The old `portfolio_is_v2` gate false-positived because single-fork forks
+  # ALSO carry the `.apexyard-fork` marker (it's written on every /setup,
+  # single-fork or split), so the marker can't tell a legit in-fork default
+  # from a sibling-intended override — see #952. Comparing the resolved path
+  # against the canonical default location is immune to that ambiguity and
+  # needs no (root-resolution-sensitive) config-key read.
+  local pd_real
+  pd_real=$(cd "$projects_dir" 2>/dev/null && pwd -P) || pd_real="$projects_dir"
+  if ! _outside_fork "$pd_real" && ! portfolio_path_eq "$pd_real" "$root_real/projects"; then
+    echo "broken: split-portfolio v2 misconfig — portfolio.projects_dir resolved to $projects_dir, which is INSIDE the ops fork ($root_real) rather than the sibling private-portfolio repo. Check for a '../' depth mismatch (or a missing leading '../') in .claude/project-config.json's portfolio.projects_dir override. See me2resh/apexyard#951."
+    return 1
+  fi
+
+  if ! _outside_fork "$wd_real" && ! portfolio_path_eq "$wd_real" "$root_real/workspace"; then
+    echo "broken: split-portfolio v2 misconfig — portfolio.workspace_dir resolved to $workspace_dir, which is INSIDE the ops fork ($root_real) rather than the sibling private-portfolio repo. Check for a '../' depth mismatch (or a missing leading '../') in .claude/project-config.json's portfolio.workspace_dir override. See me2resh/apexyard#951."
+    return 1
+  fi
+
+  if portfolio_path_under "$onboarding" "$root"; then
+    : # In-fork path — leave it to onboarding-check.sh.
+  else
+    if [ ! -f "$onboarding" ]; then
+      echo "broken: portfolio.onboarding resolved to $onboarding — file does not exist"
+      return 1
+    fi
+  fi
 
   # workspace_dir: same shape — only validate explicit overrides. The
   # in-fork default may legitimately not exist yet (no managed projects
   # cloned). Callers that need the dir should mkdir on demand.
-  case "$workspace_dir" in
-    "$root"/*|"$root")
-      # In-fork path — optional; skip.
-      ;;
-    *)
-      if [ ! -d "$workspace_dir" ]; then
-        echo "broken: portfolio.workspace_dir resolved to $workspace_dir — directory does not exist"
-        return 1
-      fi
-      # Writability check — read-only mounts (NFS / SMB / nested-container
-      # bind-mounts that drop write perms) would otherwise silent-fail when
-      # /handover or the v2 migration tries to write into workspace/.
-      # Surface the failure here so SessionStart catches it.
-      if [ ! -w "$workspace_dir" ]; then
-        echo "broken: portfolio.workspace_dir at $workspace_dir is not writable"
-        return 1
-      fi
-      ;;
-  esac
+  if portfolio_path_under "$workspace_dir" "$root"; then
+    : # In-fork path — optional; skip.
+  else
+    if [ ! -d "$workspace_dir" ]; then
+      echo "broken: portfolio.workspace_dir resolved to $workspace_dir — directory does not exist"
+      return 1
+    fi
+    # Writability check — read-only mounts (NFS / SMB / nested-container
+    # bind-mounts that drop write perms) would otherwise silent-fail when
+    # /handover or the v2 migration tries to write into workspace/.
+    # Surface the failure here so SessionStart catches it.
+    if [ ! -w "$workspace_dir" ]; then
+      echo "broken: portfolio.workspace_dir at $workspace_dir is not writable"
+      return 1
+    fi
+  fi
 
   return 0
 }

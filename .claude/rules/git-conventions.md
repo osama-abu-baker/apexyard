@@ -10,7 +10,7 @@ Examples:
 - `fix/GH-45-login-bug`
 - `docs/ENG-99-update-readme`
 
-**Types**: `feature`, `fix`, `refactor`, `chore`, `docs`, `test`, `spike`, `ci`, `build`, `perf`
+**Types**: `feature`, `fix`, `refactor`, `chore`, `docs`, `test`, `spike`, `prototype`, `ci`, `build`, `perf`
 
 The `TICKET-ID` should reference an issue in the project's tracker. Default format: `#58` or `GH-58` (GitHub Issues). The validators in `.claude/hooks/` source the regex from `.tracker.id_pattern` in `.claude/project-config.{defaults,}.json` — the default pattern also matches any uppercase tracker prefix (e.g. `ABC-123`) for teams using Linear, Jira, or similar. See `_lib-tracker.sh` and AgDR-0033 for how to swap the active tracker; ApexYard's out-of-the-box default is per-project GitHub Issues, with one repo's issues never crossing into another repo's PRs.
 
@@ -18,7 +18,7 @@ The `TICKET-ID` should reference an issue in the project's tracker. Default form
 
 Must match: `type(TICKET): description` or `type(TICKET)!: description` (breaking change)
 
-Regex: `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|spike)\(<TICKET_ID_PATTERN>\)!?:`
+Regex: `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|spike|prototype)\(<TICKET_ID_PATTERN>\)!?:`
 
 `<TICKET_ID_PATTERN>` is sourced from `.tracker.id_pattern` so adopters get their own tracker's shape validation. Default matches `#123`, `GH-123`, or `[A-Z]{2,10}-[0-9]+` (Jira / Linear / similar).
 
@@ -53,7 +53,7 @@ This is enforced by the `block-git-add-all.sh` hook.
 
 ## No Direct Main
 
-Every change must go through a PR. Zero exceptions. No commits directly to `main`/`master`. Enforced by the `block-main-push.sh` hook.
+Every change must go through a PR. Zero exceptions. No commits directly to `main`/`master`. Enforced at the git layer by `.githooks/pre-push` (terminal `git push`) and `.githooks/pre-commit` (terminal `git commit`) — both read git's own ground-truth ref/branch resolution, no command-text parsing (me2resh/apexyard#1086). `.claude/hooks/block-main-push.sh` is a blocking **backstop** on top: a Claude Code PreToolUse hook, so it stays effective against `--no-verify` (which structurally bypasses the two git-native hooks above) and on managed-project clones that haven't installed `core.hooksPath` (#1088). See [AgDR-0114](../../docs/agdr/AgDR-0114-block-main-push-honest-naming-blocking-backstop.md) for the full control-vs-backstop rationale.
 
 ## No Hardcoded Secrets
 

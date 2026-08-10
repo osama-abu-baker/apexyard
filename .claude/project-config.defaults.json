@@ -12,7 +12,10 @@
       "CI",
       "Docs",
       "Spike",
-      "Investigation"
+      "Prototype",
+      "Investigation",
+      "Migration",
+      "Idea"
     ],
     "label_priority_scheme": "P0,P1,P2,P3",
     "required_sections": {
@@ -24,24 +27,34 @@
       "Docs": ["Driver", "Acceptance Criteria"],
       "Bug": ["Given / When / Then", "Repro"],
       "Spike": ["Hypothesis", "Budget", "Kill Criteria", "Disposition"],
+      "Prototype": ["Direction Question", "Fidelity", "Budget", "Disposition"],
       "Investigation": ["Trigger", "Hypothesis being tested", "Method", "Findings", "Conclusion", "Follow-up actions"]
     },
     "skip_marker": "<!-- validate-issue-structure: skip -->",
+    "_schema_exempt_skills_comment": "Skills that file [Feature]/[Bug] issues UPSTREAM (me2resh/apexyard) using their own body template, which is deliberately distinct from this project's required_sections schema. When one of these is the active filing skill (marker at .claude/session/active-issue-skill), validate-issue-structure.sh skips the project schema for that create — they are the trusted producers of those bodies. Narrow by design: a project /feature or /bug writes its own name to the marker and is NOT exempted. See me2resh/apexyard#712.",
+    "schema_exempt_skills": [
+      "request-apexyard-feature",
+      "report-apexyard-bug"
+    ],
     "_bootstrap_skills_comment": "Skills that run BEFORE any ticket can exist (fork bootstrap, project handover, framework upstream-sync). When one of these is active (marker at .claude/session/active-bootstrap), require-active-ticket.sh exempts the gate. The marker is written by the skill itself on entry, cleared on completion, AND reset at SessionStart so a stale marker can't carry over. See AgDR-0011-bootstrap-skill-exemption.md and me2resh/apexyard#150.",
     "bootstrap_skills": [
       "setup",
       "handover",
       "update",
-      "split-portfolio"
+      "split-portfolio",
+      "onboard",
+      "tutorial"
     ],
     "_create_command_patterns_comment": "Raw ticket-create CLI shapes that require-skill-for-issue-create.sh blocks unless a structured ticket skill (/task, /feature, /bug, /spike, /migration, /investigation, /idea) is in flight (marker at .claude/session/active-issue-skill). Tracker-agnostic: extend this list in .claude/project-config.json for Linear, Jira, Asana, or custom trackers. Patterns are matched as substrings of the (whitespace-collapsed) bash command. See AgDR-0030 and me2resh/apexyard#268.",
     "create_command_patterns": [
       "gh issue create",
       "gh api repos/",
+      "glab issue create",
       "linear issue create",
       "jira issue create",
       "jira create",
-      "asana task create"
+      "asana task create",
+      "tracker_create"
     ]
   },
 
@@ -54,10 +67,19 @@
       "docs",
       "test",
       "spike",
+      "prototype",
       "ci",
       "build",
       "perf",
       "sync"
+    ],
+    "_trunk_whitelist_comment": "Trunk/shared-integration branch names validate-branch-name.sh exempts from the {type}/{TICKET}-{description} shape entirely. Includes `development` — the gitflow long form some Bitbucket/gitflow remotes use as the integration branch, missed by the original hardcoded main/master/develop/dev list. Extend in .claude/project-config.json (REPLACES this array) to add client-mandated trunk names (e.g. `trunk`, `staging`). See me2resh/apexyard#888.",
+    "trunk_whitelist": [
+      "main",
+      "master",
+      "develop",
+      "dev",
+      "development"
     ]
   },
 
@@ -75,6 +97,7 @@
       "ci",
       "revert",
       "spike",
+      "prototype",
       "sync"
     ]
   },
@@ -94,6 +117,7 @@
       "revert",
       "release",
       "spike",
+      "prototype",
       "sync"
     ],
     "required_sections": [
@@ -105,6 +129,11 @@
     "multi_close_skip_marker": "<!-- multi-close: approved -->"
   },
 
+  "mcp_search": {
+    "_comment": "Config for suggest-mcp-search.sh. gate_mode is OPT-IN (default false): when true AND the apexyard-search MCP server is configured, the hook SOFT-BLOCKS (exit 2) exploratory `grep -r`/`find` over indexed framework/project paths, instructing the agent to use search_code/search_docs first. Read/Glob/Grep stay advisory-only (never blocked — read→edit needs real line numbers). Per-call escape hatch: prefix the command with APEXYARD_MCP_FALLBACK=1 (or export it) to proceed when MCP genuinely can't serve the query (empty index, non-indexable repo, stale index). Default false keeps the hook advisory-only for everyone who doesn't opt in. See AgDR-0070, #651.",
+    "gate_mode": false
+  },
+
   "leak_protection": {
     "public_framework_repos": [
       "me2resh/apexyard"
@@ -114,7 +143,17 @@
   },
 
   "review_markers": {
-    "on_stale": "warn"
+    "on_stale": "warn",
+    "human_approver_title": "CEO",
+    "require_posted_review": false,
+    "_comment_require_posted_review": "me2resh/apexyard#1051 — OPT-IN. When true, block-unreviewed-merge.sh additionally requires that a code review was actually POSTED to the PR at the same commit the Rex marker names, verified via the forge API. Default false because it changes merge behaviour for every adopter and is GitHub-only today (glab/custom/none skip with a warning; see tracker_review_at_sha in _lib-tracker.sh). Turn it on when you want 'Rex reviewed this' to be verifiable server-side instead of inferred from a local file an agent can write. Deliberately WEAKER than the independent-reviewer gate AgDR-0062 deferred: it accepts a review posted by the PR's own author, so it is NOT separation of duties and must not be described as such. What it does prove is that a review exists on the forge at this commit, which a local file write cannot fabricate. See AgDR-0112.",
+    "_comment_human_approver_title": "me2resh/apexyard#957 — DISPLAY-ONLY override for the prose word used for the human per-PR merge approver in hook messages and /approve-merge output (e.g. 'Maintainer', 'Dev Lead'). Default 'CEO' is a zero-behaviour-change no-op. Marker filenames stay '-ceo.approved', and the structured fields (sha=, approved_by=user, skill_version=) are UNCHANGED regardless of this value — this key only affects printed text, never gate logic. See docs/agdr/AgDR-0103-configurable-approver-display-title.md."
+  },
+
+  "docs_index": {
+    "_comment": "me2resh/apexyard#753 — the maintain-docs-index.sh PostToolUse hook. OFF by default: it writes a tracked docs/INDEX.md into projects/<name>/docs/ on doc edits, so adopters opt in. When enabled it (1) regenerates the per-project docs/INDEX.md (grouped, git-dated TOC) and (2) nudges when a *.md/*.html lands under projects/<name>/ outside docs/. Advisory only — never blocks.",
+    "enabled": false,
+    "index_filename": "INDEX.md"
   },
 
   "git": {
@@ -162,9 +201,8 @@
   },
 
   "tracker": {
-    "_comment": "Tracker dispatch — selects which CLI verifies that ticket-IDs reference real tickets. Default is GH (GitHub Issues via `gh issue view`), matching today's behaviour exactly. Supported `kind` values: gh, linear, jira, asana, custom, none. `view_command` is a template with `{id}` and `{owner_repo}` placeholders — the lib substitutes them and runs the result. `id_pattern` is the regex `validate-branch-name.sh` and `validate-pr-create.sh` use to shape-check ticket IDs (covers GH `#123` / `GH-123` plus enterprise prefixes like `LIN-456` / `JIRA-789` by default). Set `kind = none` to disable existence verification entirely (shape-only). See AgDR-0033 and `.claude/hooks/_lib-tracker.sh`.",
+    "_comment": "Tracker dispatch — selects which CLI verifies that ticket-IDs reference real tickets. Default is GH (GitHub Issues via `gh issue view`), matching today's behaviour exactly. Supported `kind` values: gh, glab, linear, jira, asana, custom, none. `view_command` is a template with `{id}` and `{owner_repo}` placeholders — the lib substitutes them and runs the result. It is intentionally NOT pinned here: the lib picks a KIND-AWARE built-in default (gh → `gh issue view … --json state,title,url,labels,body`; glab → `glab issue view … --output json`), so a glab/gh adopter who only sets `kind` gets the matching command without also having to set `view_command`. Pinning a default here would deep-merge over a `kind: glab` override and force the gh command (me2resh/apexyard#755). linear/jira/asana/custom adopters still set their own `view_command`. `id_pattern` is the regex `validate-branch-name.sh` and `validate-pr-create.sh` use to shape-check ticket IDs (covers GH `#123` / `GH-123` plus enterprise prefixes like `LIN-456` / `JIRA-789` by default). Set `kind = none` to disable existence verification entirely (shape-only). See AgDR-0033 and `.claude/hooks/_lib-tracker.sh`.",
     "kind": "gh",
-    "view_command": "gh issue view {id} --repo {owner_repo} --json state,title,url,labels",
     "id_pattern": "^(#[0-9]+|GH-[0-9]+|[A-Z]{2,10}-[0-9]+)$"
   },
 
@@ -186,5 +224,121 @@
     },
     "threshold": 60,
     "timeout_minutes": 90
+  },
+
+  "eval_agents": {
+    "_comment": "Config for the /eval-agents skill. corpus_dir is where docs/eval-agents/corpus/<agent>.json files live. thresholds gate the PASS/WARN verdict (non-blocking — this skill is manual/periodic measurement, not a merge gate). approve_precision_min is the headline metric per AgDR-0089 (never the blended concordance spike #825 showed hides real failures). blocking_catch_rate_min=1.0 means ANY missed BLOCKING/HIGH ground-truth defect forces WARN regardless of the aggregate score. See AgDR-0089.",
+    "corpus_dir": "docs/eval-agents/corpus",
+    "reports_dir": "docs/eval-agents/reports",
+    "thresholds": {
+      "approve_precision_min": 0.85,
+      "blocking_catch_rate_min": 1.0,
+      "overall_catch_rate_min": 0.7,
+      "false_positive_rate_max": 0.3
+    }
+  },
+
+  "github_projects": {
+    "_comment": "GitHub Projects (v2) board integration. Set enable_auto_moves=true to auto-move cards on SDLC lifecycle events (start-ticket → In progress, PR created → In review, merge → Measurement). board_number and owner must identify your project board. status_map keys map to the option labels on your board's Status single-select field — adjust them to match your board's column names. Override this whole block in .claude/project-config.json. See .claude/hooks/_lib-project-board.sh and me2resh/apexyard#725.",
+    "owner": "",
+    "board_number": 0,
+    "enable_auto_moves": false,
+    "status_field_name": "Status",
+    "status_map": {
+      "in_progress": "In progress",
+      "review": "In review",
+      "measurement": "Measurement"
+    }
+  },
+
+  "skill_intent": {
+    "_comment": "Config for detect-skill-intent.sh — the skill-side sibling of detect-role-trigger.sh (me2resh/apexyard#894). Each entry maps a set of intent phrases to the skill that owns that work, plus the template it produces (empty string when the skill has no single template, e.g. /launch-check's 10-dimension sweep). Phrases are matched as literal, lowercased substrings against the (punctuation-stripped) prompt — data-driven so adopters can extend the map in .claude/project-config.json (shallow-merge REPLACES this whole array; copy entries you want to keep) without touching hook logic. Advisory only — see .claude/rules/skill-first.md.",
+    "map": [
+      {
+        "skill": "threat-model",
+        "template": "templates/audits/threat-model.md",
+        "phrases": ["threat model", "threat modeling", "threat modelling", "stride analysis"]
+      },
+      {
+        "skill": "dfd",
+        "template": "templates/architecture/dfd.md",
+        "phrases": ["data flow diagram", "make a dfd", "draw a dfd", "trust boundary diagram"]
+      },
+      {
+        "skill": "accessibility-audit",
+        "template": "templates/audits/accessibility-audit.md",
+        "phrases": ["accessibility audit", "a11y audit", "wcag audit", "wcag check"]
+      },
+      {
+        "skill": "compliance-check",
+        "template": "templates/audits/compliance-check.md",
+        "phrases": ["compliance check", "gdpr audit", "gdpr check", "eprivacy audit"]
+      },
+      {
+        "skill": "seo-audit",
+        "template": "templates/audits/seo-audit.md",
+        "phrases": ["seo audit", "seo check"]
+      },
+      {
+        "skill": "geo-audit",
+        "template": "templates/audits/geo-audit.md",
+        "phrases": ["geo audit", "aeo audit", "llms.txt audit"]
+      },
+      {
+        "skill": "performance-audit",
+        "template": "templates/audits/performance-audit.md",
+        "phrases": ["performance audit", "perf audit", "core web vitals audit"]
+      },
+      {
+        "skill": "monitoring-audit",
+        "template": "templates/audits/monitoring-audit.md",
+        "phrases": ["monitoring audit", "observability audit"]
+      },
+      {
+        "skill": "docs-audit",
+        "template": "templates/audits/docs-audit.md",
+        "phrases": ["docs audit", "documentation audit"]
+      },
+      {
+        "skill": "analytics-audit",
+        "template": "templates/audits/analytics-audit.md",
+        "phrases": ["analytics audit", "event taxonomy audit"]
+      },
+      {
+        "skill": "security-review",
+        "template": "templates/audits/security-review.md",
+        "phrases": ["security review", "security audit", "owasp review"]
+      },
+      {
+        "skill": "launch-check",
+        "template": "",
+        "phrases": ["launch check", "production readiness", "go no go review", "launch readiness audit"]
+      },
+      {
+        "skill": "write-spec",
+        "template": "templates/prd.md",
+        "phrases": ["write a spec", "write a prd", "draft a prd", "draft a spec", "write a feature spec"]
+      },
+      {
+        "skill": "bug",
+        "template": "templates/tickets/bug.md",
+        "phrases": ["file a bug", "report a bug", "file a bug ticket"]
+      },
+      {
+        "skill": "feature",
+        "template": "templates/tickets/feature.md",
+        "phrases": ["file a feature", "create a feature ticket", "file a feature ticket"]
+      },
+      {
+        "skill": "plan-initiative",
+        "template": "templates/initiative.md",
+        "phrases": ["plan this initiative", "plan the quarter", "plan this quarter", "plan our roadmap"]
+      },
+      {
+        "skill": "decide",
+        "template": "templates/agdr.md",
+        "phrases": ["decide between", "let's decide", "lets decide", "make a technical decision"]
+      }
+    ]
   }
 }

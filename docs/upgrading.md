@@ -8,6 +8,7 @@ This doc covers:
 - The version anchor file (`.claude/framework-version`)
 - What each migration does (table)
 - Common scenarios (multi-hop, missing anchor, skip-migrations, dry-run)
+- **When `/update` isn't enough — re-forking and keeping your data**
 - Authoring a new migration (framework maintainers only)
 
 For the daily-sync UX, see `.claude/skills/update/SKILL.md`. For the design rationale, see [`docs/agdr/AgDR-0032-update-chain-migrations.md`](agdr/AgDR-0032-update-chain-migrations.md).
@@ -63,9 +64,17 @@ The override applies once. After a successful sync, the anchor is rewritten from
 | Migration | Adds / changes | Affects |
 |-----------|---------------|---------|
 | `v1.2.0-to-v1.3.0.sh` | Moves `onboarding.yaml` and `workspace/<name>/` from the public fork to the private sibling repo (split-portfolio v2). Writes the `.apexyard-fork` anchor. Adds the `portfolio.{onboarding,workspace_dir}` keys to `.claude/project-config.json`. Updates `.gitignore`. | Split-portfolio adopters on the v1 layout. No-op for single-fork adopters. |
-| `v1.3.0-to-v1.4.0.sh` | Currently a no-op placeholder. v1.4.0-cycle tickets that need per-adopter migrations (e.g. templates/tickets reorg) will populate the body before release-cut. | TBD when v1.4.0 ships. |
+| `v4.4.0-to-v5.0.0.sh` | No-op placeholder — v5.0.0's major bump carried no per-adopter file/config migration. Backfilled by #1105. | Nobody (no-op); exists so the chain walks past this hop. |
+| `v5.0.0-to-v5.1.0.sh` | No-op placeholder. Backfilled by #1105. | Nobody (no-op); exists so the chain walks past this hop. |
+| `v5.1.0-to-v5.2.0.sh` | No-op placeholder. Backfilled by #1105. | Nobody (no-op); exists so the chain walks past this hop. |
+| `v5.2.0-to-v5.3.0.sh` | No-op placeholder. Backfilled by #1105. | Nobody (no-op); exists so the chain walks past this hop. |
+| `v5.3.0-to-v5.4.0.sh` | **Real migration.** Untracks `.claude/project-config.json` (`git rm --cached`, working-tree file and its content preserved, untrack staged not committed) so the long-inert `.gitignore` entry finally applies. Closes the #1065 data-loss window: while the file was tracked, a plain `git checkout` could silently overwrite it and destroy a split-portfolio adopter's private `portfolio` block (never in git to restore from). Idempotent — no-op if the file is already untracked; defers to the operator (exit 1) rather than force past an unexpected staged state. | Every adopter whose fork still tracks `.claude/project-config.json` (anyone upgrading from ≤ v5.3.0). No-op once untracked. |
 
 When a future release adds a migration, this table is the source of truth — the release PR template requires a row to be added here.
+
+> **Known residual gap (#1105).** The chain between `v1.3.0` and `v4.4.0` (roughly 15 releases, including the v2.x and v3.x majors) still has no migration scripts — same silent-skip failure this table's `v4.4.0`+ rows just fixed, just not backfilled yet. An adopter anchored in that range hits the same "chain refuses, anchor still advances" edge case described above. Backfilling it accurately means checking each release's actual changes rather than assuming no-op, so it's left as follow-up work rather than bundled into #1105's fix.
+>
+> Also note: `v1.3.0-to-v1.4.0.sh` no longer exists. `v1.4.0` was never tagged — v2.0.0 shipped in its place — so that script was an orphan pointing at a version the chain could never reach. It's been removed rather than renamed; see `.claude/migrations/README.md` § "Orphaned hop scripts" for why.
 
 ---
 
@@ -145,6 +154,55 @@ If a migration script reports a conflict (exit code 1), the chain pauses. The an
 ### `--from-dev` (pre-release sync)
 
 When you use `--from-dev` to pull from `upstream/dev`, the migration chain is automatically skipped — pre-release work has no release tag to anchor against. The anchor file is NOT advanced; `--from-dev` is the only path that leaves the anchor untouched.
+
+---
+
+## When `/update` isn't enough — re-forking & keeping your data
+
+Most of the time `/update` is all you need. The exception is when your fork has
+drifted so far that upgrading is a wall of conflicts — then you re-fork. Either
+way, the only thing you have to protect is **your own work**.
+
+One idea makes this easy: everything in your fork is either **the framework** or
+**your data**.
+
+- **The framework** — `.claude/`, `workflows/`, `templates/`, `docs/`. Upstream
+  owns it; upgrades overwrite it. Let them.
+- **Your data** — your registry (`apexyard.projects.yaml`), `onboarding.yaml`,
+  `projects/`, `workspace/`, `handbooks/`, and any custom skills. This is what
+  must survive.
+
+### Upgrade or re-fork?
+
+Run `/update --dry-run`. A clean or small merge → just `/update`. Conflicts
+across most of `.claude/` — or a PR from your fork to upstream that touches the
+*whole* framework tree → your base has drifted too far; re-fork.
+
+### Re-forking without losing anything
+
+Keep your data somewhere a re-fork can't reach. **Split-portfolio mode does
+exactly that** — `/split-portfolio` moves your data into a separate private repo,
+so the framework fork becomes throwaway: re-fork or upgrade it anytime and your
+data never moves.
+
+```bash
+/split-portfolio            # one-time migration — every step asks first
+/split-portfolio --dry-run  # preview the steps without running them
+```
+
+Not split yet? Do it by hand — copy your data out, re-fork `me2resh/apexyard`,
+copy it back, then re-add the upstream remote:
+
+```bash
+git remote add upstream https://github.com/me2resh/apexyard.git
+```
+
+### Seeing your project's tickets show up here?
+
+If `/feature`, `/bug`, or `/task` file tickets against `me2resh/apexyard` instead
+of your own repo, your fork predates per-project tracker routing. Run `/update` —
+it fixes the routing and turns on leak-protection so private names stay out of
+public trackers.
 
 ---
 

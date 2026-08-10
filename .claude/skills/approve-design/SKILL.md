@@ -1,7 +1,7 @@
 ---
 name: approve-design
 description: Record per-PR design-review approval (UI merge gate). ONLY on an explicit per-PR designer "approved".
-disable-model-invocation: false
+disable-model-invocation: true
 argument-hint: "<pr-number>"
 effort: low
 ---
@@ -33,14 +33,16 @@ The valid invocation triggers look like this:
 
 ## Process
 
-### 1. Parse the PR number
+### 1. Parse the PR number — and the repo
 
-Extract from `$ARGUMENTS`. If no argument is given, try to infer from:
+Extract the PR number from `$ARGUMENTS`. If no argument is given, try to infer from:
 
 - The current branch's open PR via `gh pr view --json number --jq '.number'`
 - The user's most recent message, if it named a PR explicitly
 
 If the PR number is ambiguous, STOP and ask.
+
+**Also resolve the repo (`REPO`).** Accept the fully-qualified `owner/repo#N` form, or an explicit `owner/repo` second token. In split-portfolio v2 the PR lives in a *sibling* repo, so a bare `gh pr view <pr>` resolved against the ops-fork cwd hits the WRONG repo — the marker would then be written under the ops-fork qualifier and the `require-design-review-for-ui.sh` gate (which keys on the PR's real repo, derived from the merge command's cd-target, me2resh/apexyard#687) would never find it → false-block. Pass `--repo "$REPO"` to **every** `gh pr view` call below when `REPO` is known. **Fail loud:** if only a bare number was given and `gh pr view <pr>` cannot resolve the PR from the current cwd, STOP and ask for the `owner/repo#N` form — never write the marker under a guessed qualifier.
 
 ### 2. Sanity-check the user's intent
 
@@ -55,7 +57,7 @@ If any of these are unclear — **STOP**. Reply with a per-PR explicit question:
 
 ### 3. Verify the PR state
 
-Run `gh pr view <pr> --json state,isDraft,mergeable`. Sanity checks:
+Run `gh pr view <pr> ${REPO:+--repo "$REPO"} --json state,isDraft,mergeable`. Sanity checks:
 
 - `state` must be `OPEN`.
 - Refuse if `MERGED`, `CLOSED`, or `DRAFT`.
@@ -77,8 +79,26 @@ done
 MARKER_HOME="${OPS_ROOT:-$REPO_ROOT}"
 # shellcheck source=/dev/null
 . "$MARKER_HOME/.claude/hooks/_lib-review-markers.sh"
-PR_REPO=$(gh pr view <pr> --json headRepository --jq '.headRepository.nameWithOwner' 2>/dev/null)
-REX=$(review_marker_path "$PR_REPO" <pr> rex "$MARKER_HOME")
+# Base (host) repo — the canonical marker key: it matches Rex's marker AND the
+# merge gate's lookup (which keys on the merge command's base repo, #765). Prefer
+# the repo resolved in step 1 (already the base, #687); if it wasn't given, fall
+# back to the CURRENT checkout's own remote — a deterministic, non-ambient
+# source of truth. Do NOT fall back to an unscoped
+# `gh pr view <pr> --json headRepository`: that call reads the wrong field (the
+# PR's head/fork) and is itself an ambient-resolved gh query that can silently
+# prefer the wrong repo in a fork checkout (#887). pr_base_repo now REQUIRES
+# this repo and scopes its own gh query to it — never gh's ambient default —
+# so same-repo PRs still resolve unchanged.
+if [ -n "$REPO" ]; then
+  REPO_FOR_BASE="$REPO"
+else
+  origin_url=$(git remote get-url origin 2>/dev/null)
+  origin_url="${origin_url%.git}"
+  REPO_FOR_BASE=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##')
+fi
+PR_HOST_REPO=$(pr_base_repo <pr> "$REPO_FOR_BASE")
+PR_REPO="$PR_HOST_REPO"
+REX=$(review_marker_path "$PR_HOST_REPO" <pr> rex "$MARKER_HOME")
 [ -f "$REX" ] && [ "$(tr -d '[:space:]' < "$REX")" = "$(git rev-parse HEAD)" ]
 ```
 
@@ -97,9 +117,10 @@ gh pr diff <pr> --name-only | grep -qE '\.(tsx|jsx|vue|svelte|css|scss|sass|less
 Use the repo-qualified path via `_lib-review-markers.sh` (already sourced in step 4):
 
 ```bash
-# (MARKER_HOME and PR_REPO already resolved in step 4 — reuse them here.)
+# (MARKER_HOME and PR_HOST_REPO already resolved in step 4 — reuse them here.)
 mkdir -p "$MARKER_HOME/.claude/session/reviews"
-DESIGN=$(review_marker_path "$PR_REPO" <pr> design "$MARKER_HOME")
+# design marker keyed on the BASE repo — same key as Rex's marker + the gate (#765).
+DESIGN=$(review_marker_path "$PR_HOST_REPO" <pr> design "$MARKER_HOME")
 git rev-parse HEAD > "$DESIGN"
 ```
 
@@ -126,7 +147,10 @@ Design approval recorded for PR #<pr> at <sha>. The design-review merge gate wil
 
 ```
 Designer: "The mockup in Figma looks great, ship it"
-You: *invokes /approve-design 42*  ← WRONG
+You: *tries to invoke /approve-design 42*  ← WRONG, twice over: a mockup nod is
+                                             not implementation review, AND
+                                             since #1042 the model cannot
+                                             invoke this skill at all.
 ```
 
 The designer approved a **mockup**, not the **PR's implementation of that mockup**. The implementation might differ from the mockup. The correct flow:
@@ -136,7 +160,9 @@ Designer: "The mockup in Figma looks great, ship it"
 You: *implements the mockup in PR #42*
 You: "PR #42 implements the approved mockup. Can you review the PR diff to confirm the implementation matches?"
 Designer: "Reviewed PR #42, implementation matches the mockup. Design approved."
-You: *invokes /approve-design 42*  ← CORRECT
+You: "Then run /approve-design 42 to record it."
+Designer: /approve-design 42       ← CORRECT: a human invokes it. The skill is
+                                     human-only (#1042), so the model cannot.
 ```
 
 Two distinct moments. One is mockup approval (design phase). The other is implementation-review approval (code-review phase). They are not the same approval.

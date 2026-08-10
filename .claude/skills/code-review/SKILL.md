@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: Review a PR for quality, security, and standards compliance. Invokes the Code Reviewer agent (Rex).
-disable-model-invocation: true
+disable-model-invocation: false
 argument-hint: "<pr-number> [repo]"
 allowed-tools: Bash, Read, Grep, Glob
 ---
@@ -36,12 +36,37 @@ See [`.claude/rules/role-triggers.md`](../../rules/role-triggers.md) for the ful
 
 ## Process
 
+### 0. Write the active-reviewer marker (REQUIRED — me2resh/apexyard#843)
+
+Before spawning the Code Reviewer agent (Rex), write the active-reviewer session marker. It records that this review pass is the sanctioned one, and suppresses `warn-review-marker-write.sh`'s advisory warning on Rex's `*-rex.approved` write (that hook warns and never blocks since #1026 — AgDR-0111). At skill entry:
+
+```bash
+ops_root=$(git rev-parse --show-toplevel)
+r="$ops_root"
+while [ -n "$r" ] && [ "$r" != "/" ]; do
+  [ -f "$r/.apexyard-fork" ] && { ops_root="$r"; break; }
+  [ -f "$r/onboarding.yaml" ] && [ -f "$r/apexyard.projects.yaml" ] && { ops_root="$r"; break; }
+  r=$(dirname "$r")
+done
+mkdir -p "$ops_root/.claude/session"
+printf '%s\n' "<owner/repo>#<pr>:rex" > "$ops_root/.claude/session/active-reviewer"
+```
+
+On skill exit (after Rex posts its verdict, whether APPROVED or CHANGES REQUESTED), clear the marker:
+
+```bash
+rm -f "$ops_root/.claude/session/active-reviewer"
+```
+
+Nothing mechanically stops a build-class sub-agent writing the same file; what makes Rex's marker legitimate is that a real, independent review happened. See `.claude/hooks/warn-review-marker-write.sh` and `.claude/rules/pr-workflow.md` § "Build agents cannot self-review".
+
 1. Fetch PR details and the latest commit SHA
 2. Get the diff
 3. Review against the checklist (architecture, code quality, testing, security, performance)
 4. Check for the required Glossary section
 5. Check for AgDR links if technical decisions were made
-6. Submit a GitHub review via `gh pr review`
+6. On JS/TS diffs, run the Fallow static-analysis pass (§ 9 of the agent) — changed-scope, fail-soft, advisory; render a `### Fallow Findings` table + dry-run fix preview
+7. Submit the review through the tracker-agnostic `tracker_review_submit` (gh PR / glab MR / custom host — #758), not a hardcoded `gh pr review`, then clear the active-reviewer marker from step 0
 
 ## Review Checklist
 
@@ -99,6 +124,7 @@ Posts a GitHub review comment with:
 - Commit SHA reviewed
 - Checklist results
 - Issues found
+- Fallow findings (advisory; JS/TS diffs only, when the `fallow` CLI is available)
 - Verdict: APPROVED / CHANGES REQUESTED / COMMENT
 
 Invokes: Code Reviewer Agent (Rex)

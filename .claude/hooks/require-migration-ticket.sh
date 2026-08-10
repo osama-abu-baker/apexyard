@@ -35,17 +35,40 @@
 #
 # The config is read from `<ops_root>/.claude/project-config.json` if
 # present, otherwise defaults below apply.
+#
+# ALL write targets are judged, not just the first (apexyard#886): a Bash
+# command can name more than one write target (`echo x > /tmp/scratch.sql
+# && echo y > db/migrations/002_add.sql`). Judging only the first target
+# let a command whose first target wasn't migration-shaped slip a later,
+# genuinely migration-shaped target past this gate entirely. See the
+# target-resolution loop below (after is_migration_path is defined) for
+# how every extracted target gets checked.
+
+# Exempt meta / docs / example files — these never need a migration
+# ticket regardless of path. Applied PER TARGET (not just once against
+# the first extracted target) so a meta-exempt target can't shadow a
+# genuinely migration-shaped target named later in the same command.
+_rmt_is_meta_exempt() {
+  case "$1" in
+    */.claude/*|*/.claude|*/docs/*|*/docs) return 0 ;;
+    *.md|*.example) return 0 ;;
+  esac
+  # Note: `*/projects/*/docs/*` is subsumed by `*/docs/*` above (shell case
+  # `*` crosses `/`), so no separate arm is needed.
+  return 1
+}
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null)
 
-# Bash-tool path: if the command writes, try to extract the target so we
-# can apply the migration-path matcher to it. If extraction fails (e.g.
-# `python -c '…write_text("file"…)…'`), FILE_PATH stays empty and the
-# hook exits 0 — the migration gate is path-specific, so an
-# unextractable target falls outside the gate's scope.
+# Bash-tool path: if the command writes, collect ALL extractable targets so
+# every one can be checked against the migration-path matcher below — not
+# just the first (#886). If extraction finds nothing at all (e.g.
+# `python -c '…write_text("file"…)…'`), the migration gate is path-specific
+# by design and falls outside its scope, same as before this change.
 # See me2resh/apexyard#151 + _lib-detect-bash-write.sh for the detector.
+BASH_TARGETS=""
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
   [ -z "$COMMAND" ] && exit 0
@@ -57,26 +80,28 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     if ! bash_command_appears_to_write "$COMMAND"; then
       exit 0
     fi
-    FILE_PATH=$(bash_extract_write_target "$COMMAND")
+    BASH_TARGETS=$(bash_extract_write_targets "$COMMAND")
   else
     # Library missing — fall back to no-op rather than bricking the hook.
     exit 0
   fi
+
+  if [ -z "$BASH_TARGETS" ]; then
+    exit 0
+  fi
+  # Resolved to the gate-worthy target further down, once is_migration_path
+  # is defined — see the resolution loop after that function.
+  FILE_PATH=""
 fi
 
-if [ -z "$FILE_PATH" ]; then
-  exit 0
+if [ "$TOOL_NAME" != "Bash" ]; then
+  if [ -z "$FILE_PATH" ]; then
+    exit 0
+  fi
+  if _rmt_is_meta_exempt "$FILE_PATH"; then
+    exit 0
+  fi
 fi
-
-# --------- Exempt meta / docs / example files ---------
-# These never need a migration ticket regardless of path, so short-circuit
-# before doing any network calls.
-case "$FILE_PATH" in
-  */.claude/*|*/.claude|*/docs/*|*/docs) exit 0 ;;
-  *.md|*.example) exit 0 ;;
-esac
-# Note: `*/projects/*/docs/*` is subsumed by `*/docs/*` above (shell case `*`
-# crosses `/`), so no separate arm is needed.
 
 # --------- Discover ops root ---------
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -98,7 +123,7 @@ if [ -n "$REPO_ROOT" ]; then
         OPS_ROOT="$r"
         break
       fi
-      r=$(dirname "$r")
+      parent=$(dirname "$r"); [ "$parent" = "$r" ] && break; r="$parent"
     done
   fi
 fi
@@ -175,7 +200,29 @@ is_migration_path() {
   return 1
 }
 
-if ! is_migration_path "$FILE_PATH"; then
+# --------- Resolve which target (if any) is migration-shaped ---------
+# #886: for a Bash command, check EVERY extracted target — not just the
+# first — skipping any that are meta-exempt, and gate on the first one
+# that matches a migration-path pattern. For a non-Bash tool call there is
+# only ever the one FILE_PATH (already meta-exemption-checked above).
+if [ "$TOOL_NAME" = "Bash" ]; then
+  RESOLVED_TARGET=""
+  while IFS= read -r _tgt; do
+    [ -z "$_tgt" ] && continue
+    _rmt_is_meta_exempt "$_tgt" && continue
+    if is_migration_path "$_tgt"; then
+      RESOLVED_TARGET="$_tgt"
+      break
+    fi
+  done <<< "$BASH_TARGETS"
+
+  if [ -z "$RESOLVED_TARGET" ]; then
+    # No target in this command matches a migration path — other hooks
+    # handle the standard ticket check.
+    exit 0
+  fi
+  FILE_PATH="$RESOLVED_TARGET"
+elif ! is_migration_path "$FILE_PATH"; then
   # Not a migration file — other hooks handle the standard ticket check.
   exit 0
 fi
@@ -263,38 +310,99 @@ MSG
   exit 2
 fi
 
-# --------- Jira-tracked tickets: GitHub verification is impossible ---------
-# `gh issue view` only resolves GitHub Issues. When the active ticket key is
-# a Jira-style key (e.g. ITH-88), the GitHub gates below can never pass, so
-# fall back to verifying locally that a migration AgDR referencing this
-# ticket exists. See ITH-94 + the standing rule that apexyard hooks must not
-# check GitHub for Jira-tracked references.
-if echo "$TICKET_NUM" | grep -qE '^[A-Z][A-Z0-9]+-[0-9]+$'; then
-  AGDR_SEARCH_DIRS="$MARKER_HOME/docs/agdr"
-  if [ -f "$PCONFIG" ] && command -v jq >/dev/null 2>&1; then
-    pdir=$(jq -r '.portfolio.projects_dir // empty' "$PCONFIG" 2>/dev/null)
-    if [ -n "$pdir" ]; then
-      case "$pdir" in
-        /*) : ;;
-        *)  pdir="$MARKER_HOME/$pdir" ;;
-      esac
-      AGDR_SEARCH_DIRS="$AGDR_SEARCH_DIRS $pdir"
+# --------- Shape-guard marker-derived values before the tracker call ---------
+# TICKET_NUM / TICKET_REPO come from the session-local active-ticket marker via
+# `cut -d= -f2-`, which keeps everything after the first `=` — so a marker line
+# like `number=42; touch X` yields TICKET_NUM='42; touch X'. Gate 2 below feeds
+# both values into `tracker_view`, which builds its command by string-substituting
+# {id}/{owner_repo} into a template and running `eval` (_lib-tracker.sh). Without a
+# shape check that is a command-injection sink: the base (pre-#755) hook used direct
+# argv (`gh issue view "$TICKET_NUM" --repo "$TICKET_REPO"`), which was
+# injection-immune; routing through the tracker abstraction reintroduces the eval.
+# The sibling caller `validate-pr-create.sh` reaches the same eval only AFTER its
+# ticket number passed a shape check — this hook must not skip the equivalent guard.
+# Whitelist a conservative charset (no shell metacharacters): ticket IDs like 42,
+# #42, GH-42, ABC-123; owner/repo slugs (incl. GitLab nested groups) of letters,
+# digits, `.`, `_`, `-`, `/`. Anything else fails closed. (#755 security review;
+# defence-in-depth alongside the printf %q quoting _tracker_substitute now applies.)
+if ! printf '%s' "$TICKET_NUM" | grep -qE '^#?[A-Za-z0-9_-]+$'; then
+  cat >&2 <<MSG
+BLOCKED: Active ticket marker at $MARKER has a malformed \`number=\` value.
+Only ticket IDs like 42, #42, GH-42, or ABC-123 are allowed (no shell
+metacharacters). Re-run /start-ticket to rewrite the marker cleanly.
+MSG
+  exit 2
+fi
+if ! printf '%s' "$TICKET_REPO" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+  cat >&2 <<MSG
+BLOCKED: Active ticket marker at $MARKER has a malformed \`repo=\` value.
+Only owner/repo slugs (letters, digits, \`.\`, \`_\`, \`-\`, \`/\`) are
+allowed (no shell metacharacters). Re-run /start-ticket to rewrite the
+marker cleanly.
+MSG
+  exit 2
+fi
+
+# --------- Gate 2: issue is open + has migration label ---------
+# Resolve the ticket through the tracker abstraction (_lib-tracker.sh) so this
+# gate works for every configured tracker — GitHub (gh), GitLab (glab), Linear,
+# Jira, Asana, custom — not just GitHub. Before #755 this hardcoded
+# `gh issue view`, which returned empty for GitLab-tracked projects and
+# false-blocked every migration edit even when the GitLab ticket was valid.
+# tracker_view emits the normalised {state,title,url,labels,body} shape
+# regardless of tracker; labels come back as a flat string array and body is
+# populated for gh/glab/jira/linear/asana — every built-in kind the migration
+# gate reads (#761 widened body beyond the original gh/glab of #755).
+if [ -f "$HOOK_DIR/_lib-tracker.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$HOOK_DIR/_lib-tracker.sh"
+fi
+
+# Resolve the tracker kind for the TICKET's repo (per-project registry override
+# wins over the global config; see #670). tracker.kind=none has no queryable
+# tracker, so existence / label / AgDR can't be verified online — per the #755
+# Expected behaviour, skip the online gates (Gate 1 already proved an active
+# ticket marker exists) and allow the edit, operator-trusted. The skip is
+# printed to stderr so it is auditable, never silent.
+TICKET_KIND="gh"
+if command -v tracker_kind >/dev/null 2>&1; then
+  TICKET_KIND=$(tracker_kind "$TICKET_REPO" 2>/dev/null)
+  [ -n "$TICKET_KIND" ] || TICKET_KIND="gh"
+fi
+if [ "$TICKET_KIND" = "none" ]; then
+  # Local strengthening: for a Jira-shaped key (e.g. ITH-88) under
+  # tracker.kind=none, don't just trust the operator blindly (#755's
+  # default) -- this fork has no `jira` CLI for hooks to shell out to, but
+  # it DOES have real migration AgDRs, so verify one exists locally that
+  # references the ticket. See ITH-94 + the standing rule that apexyard
+  # hooks must not check GitHub for Jira-tracked references. Non-Jira-shaped
+  # keys under tracker.kind=none fall through to upstream's #755 skip.
+  if echo "$TICKET_NUM" | grep -qE '^[A-Z][A-Z0-9]+-[0-9]+$'; then
+    AGDR_SEARCH_DIRS="$MARKER_HOME/docs/agdr"
+    if [ -f "$PCONFIG" ] && command -v jq >/dev/null 2>&1; then
+      pdir=$(jq -r '.portfolio.projects_dir // empty' "$PCONFIG" 2>/dev/null)
+      if [ -n "$pdir" ]; then
+        case "$pdir" in
+          /*) : ;;
+          *)  pdir="$MARKER_HOME/$pdir" ;;
+        esac
+        AGDR_SEARCH_DIRS="$AGDR_SEARCH_DIRS $pdir"
+      fi
     fi
-  fi
 
-  AGDR_HIT=""
-  for d in $AGDR_SEARCH_DIRS; do
-    [ -d "$d" ] || continue
-    AGDR_HIT=$(find "$d" -type f -name 'AgDR-*migration*.md' \
-      -exec grep -lF "$TICKET_NUM" {} + 2>/dev/null | head -1)
-    [ -n "$AGDR_HIT" ] && break
-  done
+    AGDR_HIT=""
+    for d in $AGDR_SEARCH_DIRS; do
+      [ -d "$d" ] || continue
+      AGDR_HIT=$(find "$d" -type f -name 'AgDR-*migration*.md' \
+        -exec grep -lF "$TICKET_NUM" {} + 2>/dev/null | head -1)
+      [ -n "$AGDR_HIT" ] && break
+    done
 
-  if [ -z "$AGDR_HIT" ]; then
-    cat >&2 <<MSG
-BLOCKED: Active migration ticket ${TICKET_NUM} is Jira-tracked, so the
-GitHub issue verification is skipped — but no migration AgDR referencing
-${TICKET_NUM} was found locally.
+    if [ -z "$AGDR_HIT" ]; then
+      cat >&2 <<MSG
+BLOCKED: Active migration ticket ${TICKET_NUM} is Jira-tracked (tracker.kind=none),
+so no online verification is possible -- but no migration AgDR referencing
+${TICKET_NUM} was found locally either.
 
 A migration-class change needs a paired AgDR capturing rollback plan,
 downtime, cross-service consumers, and observability. Create one with
@@ -302,39 +410,63 @@ downtime, cross-service consumers, and observability. Create one with
 
 Searched: $AGDR_SEARCH_DIRS
 MSG
-    exit 2
+      exit 2
+    fi
+
+    echo "require-migration-ticket: ${TICKET_NUM} is Jira-tracked (tracker.kind=none) -- verified migration AgDR $AGDR_HIT references it." >&2
+    exit 0
   fi
 
-  echo "require-migration-ticket: ${TICKET_NUM} is Jira-tracked — GitHub label/body checks skipped; verified migration AgDR $AGDR_HIT references it." >&2
+  echo "note: tracker.kind=none for ${TICKET_REPO} — skipping migration label/AgDR verification (operator-trusted; #755)." >&2
   exit 0
 fi
 
+if command -v tracker_view >/dev/null 2>&1; then
+  ISSUE_JSON=$(tracker_view "$TICKET_NUM" "$TICKET_REPO" 2>/dev/null)
+else
+  # Library missing (should not happen in a real fork) — fall back to gh so the
+  # gate still functions on a GitHub tracker rather than bricking, normalising
+  # to the same shape tracker_view emits (labels as a flat string array).
+  ISSUE_JSON=$(gh issue view "$TICKET_NUM" --repo "$TICKET_REPO" --json state,title,url,labels,body 2>/dev/null \
+    | jq -c '{state,title,url,labels:((.labels // []) | map(.name)),body}' 2>/dev/null)
+fi
 
-# --------- Gate 2: issue is open + has migration label ---------
-ISSUE_JSON=$(gh issue view "$TICKET_NUM" --repo "$TICKET_REPO" --json state,labels,body 2>/dev/null)
 if [ -z "$ISSUE_JSON" ]; then
   cat >&2 <<MSG
-BLOCKED: Could not fetch ${TICKET_REPO}#${TICKET_NUM} from GitHub.
-Network / auth problem? Or the issue doesn't exist?
+BLOCKED: Could not fetch ${TICKET_REPO}#${TICKET_NUM} from the configured
+tracker (kind: ${TICKET_KIND}). Network / auth problem? Or the issue
+doesn't exist?
 
-Migration files can't be edited without a verifiable migration ticket.
-Check your gh auth status, or run /migration to create a new ticket.
+The migration gate is fail-closed by design — a high-blast-radius change is
+not allowed against a ticket the framework cannot verify. (This is stricter
+than the PR-create / commit-ref existence checks, which fall back to
+shape-only when a non-gh CLI is unreachable, per #501 — a migration edit
+warrants a hard stop.) If your tracker is untracked, set tracker.kind=none.
+
+Check your tracker auth (e.g. gh auth status / glab auth status), or run
+/migration to create a new ticket.
 MSG
   exit 2
 fi
 
-STATE=$(echo "$ISSUE_JSON" | jq -r .state)
-HAS_LABEL=$(echo "$ISSUE_JSON" | jq -r --arg L "$MIGRATION_LABEL" '.labels | map(.name) | index($L) != null')
-BODY=$(echo "$ISSUE_JSON" | jq -r .body)
+STATE=$(echo "$ISSUE_JSON" | jq -r '.state // empty')
+# Normalised labels are a flat string array, so a direct membership test.
+HAS_LABEL=$(echo "$ISSUE_JSON" | jq -r --arg L "$MIGRATION_LABEL" '.labels | index($L) != null')
+BODY=$(echo "$ISSUE_JSON" | jq -r '.body // empty')
 
-if [ "$STATE" != "OPEN" ]; then
-  cat >&2 <<MSG
-BLOCKED: Active ticket ${TICKET_REPO}#${TICKET_NUM} is $STATE, not OPEN.
+# Closed-state recognition is tracker-agnostic — same vocabulary as
+# validate-pr-create.sh / verify-commit-refs.sh: gh/glab "CLOSED", Linear
+# "Done", Jira "Resolved", Asana "Closed", etc.
+STATE_LC=$(echo "$STATE" | tr '[:upper:]' '[:lower:]')
+case "$STATE_LC" in
+  closed|done|cancelled|canceled|resolved|completed)
+    cat >&2 <<MSG
+BLOCKED: Active ticket ${TICKET_REPO}#${TICKET_NUM} is "$STATE", not open.
 Migration files require an OPEN labelled ticket. Run /migration to create
 a fresh one, or /start-ticket on a different OPEN migration ticket.
 MSG
-  exit 2
-fi
+    exit 2 ;;
+esac
 
 if [ "$HAS_LABEL" != "true" ]; then
   cat >&2 <<MSG
@@ -358,7 +490,26 @@ MSG
 fi
 
 # --------- Gate 3: body references a migration AgDR ---------
+# The issue body is populated by tracker_view for the gh, glab, jira, linear, and
+# asana adapters (see _lib-tracker.sh — #761 widened it beyond the original
+# gh/glab of #755). Only the `custom` adapter can leave body empty (unless the
+# operator's normalise_jq emits one), so this gate cannot see an AgDR link there
+# even when one exists — surface that in the failure message rather than blaming
+# the ticket. Adopters on custom can set tracker.kind=none to skip online
+# migration verification.
 if ! echo "$BODY" | grep -qE 'docs/agdr/AgDR-[0-9]+-[^[:space:]]*migration[^[:space:]]*\.md'; then
+  KIND_NOTE=""
+  case "$TICKET_KIND" in
+    gh|glab|jira|linear|asana) ;;
+    *) KIND_NOTE="
+
+NOTE: tracker.kind=${TICKET_KIND} — this gate reads the issue body via
+tracker_view, which only populates body for the gh, glab, jira, linear, and
+asana adapters. For ${TICKET_KIND} the body may not be fetched, so this check
+cannot see an AgDR link even if the ticket has one. Emit body from your
+custom normalise_jq, track migrations on a built-in tracker, or set
+tracker.kind=none to skip online migration verification." ;;
+  esac
   cat >&2 <<MSG
 BLOCKED: Active ticket ${TICKET_REPO}#${TICKET_NUM} has the
 \`$MIGRATION_LABEL\` label but its body does not reference a migration
@@ -373,7 +524,7 @@ ticket body to include a reference to it:
   gh issue edit $TICKET_NUM --repo $TICKET_REPO --body-file <path>
 
 The regex the hook checks is permissive — any occurrence of the AgDR
-relative path in the body satisfies gate 3.
+relative path in the body satisfies gate 3.${KIND_NOTE}
 MSG
   exit 2
 fi

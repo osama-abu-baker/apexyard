@@ -50,7 +50,10 @@ fi
 
 SKIP_MARKER='<!-- pre-push: skip -->'
 HEAD_MSG=$(cd "$REPO_ROOT" && git log -1 --format='%B' 2>/dev/null)
-if echo "$HEAD_MSG" | grep -qF -- "$SKIP_MARKER"; then
+# -x: whole-line match only, so prose that mentions the marker inline
+# (e.g. a commit that documents the escape hatch) does not trigger it —
+# only a line consisting of exactly the marker does. See #1097.
+if printf '%s\n' "$HEAD_MSG" | grep -qxF -- "$SKIP_MARKER"; then
   echo "WARN: pre-push gate bypassed by skip marker in HEAD commit message." >&2
   echo "      Skipped commands will run in CI regardless — fix broken state before merging." >&2
   exit 0
@@ -85,15 +88,19 @@ fi
 cd "$REPO_ROOT" || exit 0
 
 FAILURES=""
-NUM_CMDS=$(echo "$CMDS_JSON" | jq 'length' 2>/dev/null)
+# printf '%s', NOT echo: CMDS_JSON comes from config_get and may carry a JSON
+# backslash escape (the markdownlint `tr '\n' '\0'` command). echo would mangle
+# it under an escape-interpreting shell, zeroing NUM_CMDS and silently skipping
+# every pre-push check. Same bug class as #629. See #631.
+NUM_CMDS=$(printf '%s' "$CMDS_JSON" | jq 'length' 2>/dev/null)
 if [ -z "$NUM_CMDS" ] || [ "$NUM_CMDS" = "null" ]; then
   exit 0
 fi
 
 i=0
 while [ "$i" -lt "$NUM_CMDS" ]; do
-  NAME=$(echo "$CMDS_JSON" | jq -r ".[$i].name // \"step-$i\"" 2>/dev/null)
-  RUN=$(echo "$CMDS_JSON" | jq -r ".[$i].run // empty" 2>/dev/null)
+  NAME=$(printf '%s' "$CMDS_JSON" | jq -r ".[$i].name // \"step-$i\"" 2>/dev/null)
+  RUN=$(printf '%s' "$CMDS_JSON" | jq -r ".[$i].run // empty" 2>/dev/null)
   i=$((i + 1))
 
   if [ -z "$RUN" ]; then

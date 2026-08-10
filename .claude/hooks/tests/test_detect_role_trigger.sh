@@ -16,6 +16,13 @@
 
 set -u
 
+# The session-scoped de-dupe (#995) keys on CLAUDE_CODE_SESSION_ID. Unset it
+# for the per-case tests below so each invocation is in the fail-open
+# always-fire mode — deterministic and independent of whatever ambient
+# session happens to be running this test. Section (7) sets its own id to
+# exercise the de-dupe explicitly.
+unset CLAUDE_CODE_SESSION_ID
+
 SRC_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 HOOK="$SRC_ROOT/.claude/hooks/detect-role-trigger.sh"
 
@@ -133,6 +140,33 @@ in=$(jq -nc \
   '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
 run_case "path trigger: ordinary path is silent" 0 "" "$in"
 
+# 2e-i. Trust chain (#777): a merge-gate hook fires Security Auditor.
+in=$(jq -nc \
+  --arg p ".claude/hooks/block-unreviewed-merge.sh" \
+  '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "trust chain: .claude/hooks/* fires Security Auditor [#777]" 0 \
+  "ROLE TRIGGER: Security Auditor.*roles/security/security-auditor\\.md" "$in"
+
+# 2e-ii. Trust chain (#777): settings.json (the matcher wiring) fires Security Auditor.
+in=$(jq -nc \
+  --arg p ".claude/settings.json" \
+  '{hook_event_name:"PreToolUse", tool_name:"Write", tool_input:{file_path:$p}}')
+run_case "trust chain: .claude/settings.json fires Security Auditor [#777]" 0 \
+  "ROLE TRIGGER: Security Auditor" "$in"
+
+# 2e-iii. Trust chain (#777): a nested hooks path (e.g. a managed-project fork) fires too.
+in=$(jq -nc \
+  --arg p "workspace/proj/.claude/hooks/_lib-tracker.sh" \
+  '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "trust chain: */.claude/hooks/* fires Security Auditor [#777]" 0 \
+  "ROLE TRIGGER: Security Auditor" "$in"
+
+# 2e-iv. A .claude path that is NOT trust-chain (a skill doc) stays silent.
+in=$(jq -nc \
+  --arg p ".claude/skills/roadmap/SKILL.md" \
+  '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "trust chain: non-hook .claude path is silent [#777]" 0 "" "$in"
+
 # 2f. Edit on .github/workflows/ci.yml → Platform Engineer banner.
 in=$(jq -nc \
   --arg p ".github/workflows/ci.yml" \
@@ -205,67 +239,82 @@ else
 fi
 
 # --- (4) HYBRID class-aware banner — AgDR-0050 § Axis 6 (Wave 2 PR 5) --------
-# Each banner now includes either "Isolated-work-class — SPAWN the sub-agent"
-# or "In-flow-class — adopt the persona IN-THREAD" depending on the matched
-# role's **Class** value in its role file. Verifies the class lookup actually
-# fires + the security-auditor → security-reviewer slug exception.
+# Each banner is now ADVISORY with a convergence guard (#995): isolated-work
+# roles carry "you MAY spawn it ... subagent_type: <slug>", in-flow roles carry
+# "read <file> to adopt its lens in-thread", and BOTH carry "do NOT switch
+# persona ... finish the current unit first". Verifies the class lookup fires +
+# the security-auditor → security-reviewer slug exception.
 
-# 4a. Security Auditor (isolated-work-class) — banner instructs SPAWN with
+# 4a. Security Auditor (isolated-work-class) — banner offers SPAWN with
 #     subagent_type: security-reviewer (NOT security-auditor; the
 #     Hatim→Hakim consolidation in PR #360 kept the filename).
 in=$(jq -nc \
   --arg p "src/auth/login.ts" \
   '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
-run_case "hybrid class-aware: Security Auditor → isolated-work-class banner" 0 \
-  "Isolated-work-class.*subagent_type: security-reviewer" "$in"
+run_case "hybrid class-aware: Security Auditor → spawn-offer banner" 0 \
+  "MAY spawn.*subagent_type: security-reviewer" "$in"
 
-# 4b. Platform Engineer (in-flow-class) — banner instructs in-thread
+# 4b. Platform Engineer (in-flow-class) — banner offers in-thread lens
 #     adoption. The CI/CD diff path triggers this role.
 in=$(jq -nc \
   --arg p ".github/workflows/ci.yml" \
   '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
-run_case "hybrid class-aware: Platform Engineer → in-flow-class banner" 0 \
-  "Platform Engineer.*In-flow-class.*adopt the persona IN-THREAD" "$in"
+run_case "hybrid class-aware: Platform Engineer → in-thread-lens banner" 0 \
+  "Platform Engineer.*adopt its lens in-thread" "$in"
 
-# 4c. Tech Lead (isolated-work-class) — banner instructs SPAWN with
+# 4c. Tech Lead (isolated-work-class) — banner offers SPAWN with
 #     subagent_type: tech-lead. Triggered by edits under docs/agdr/.
 in=$(jq -nc \
   --arg p "docs/agdr/AgDR-0099-example.md" \
   '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
-run_case "hybrid class-aware: Tech Lead → isolated-work-class banner" 0 \
-  "Tech Lead.*Isolated-work-class.*subagent_type: tech-lead" "$in"
+run_case "hybrid class-aware: Tech Lead → spawn-offer banner" 0 \
+  "Tech Lead.*subagent_type: tech-lead" "$in"
 
-# 4d. QA Engineer (isolated-work-class) — banner instructs SPAWN with
+# 4d. QA Engineer (isolated-work-class) — banner offers SPAWN with
 #     subagent_type: qa-engineer. Triggered by `gh issue edit --add-label qa`.
 in=$(jq -nc \
   --arg c "gh issue edit 42 --add-label qa" \
   '{hook_event_name:"PreToolUse", tool_name:"Bash", tool_input:{command:$c}}')
-run_case "hybrid class-aware: QA Engineer → isolated-work-class banner" 0 \
-  "QA Engineer.*Isolated-work-class.*subagent_type: qa-engineer" "$in"
+run_case "hybrid class-aware: QA Engineer → spawn-offer banner" 0 \
+  "QA Engineer.*subagent_type: qa-engineer" "$in"
 
-# 4e. Prompted Backend Engineer (in-flow-class) — banner instructs
-#     in-thread adoption.
+# 4e. Prompted Backend Engineer (in-flow-class) — banner offers in-thread
+#     lens adoption.
 in=$(jq -nc \
   --arg prm "act as the backend engineer and refactor this handler" \
   '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
-run_case "hybrid class-aware: Backend Engineer prompted → in-flow-class banner" 0 \
-  "Backend Engineer.*In-flow-class.*adopt the persona IN-THREAD" "$in"
+run_case "hybrid class-aware: Backend Engineer prompted → in-thread-lens banner" 0 \
+  "Backend Engineer.*adopt its lens in-thread" "$in"
 
-# 4f. Prompted UX Designer (in-flow-class) — banner instructs in-thread
+# 4f. Prompted UX Designer (in-flow-class) — banner offers in-thread lens
 #     adoption.
 in=$(jq -nc \
   --arg prm "put on your UX Designer hat for this flow review" \
   '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
-run_case "hybrid class-aware: UX Designer prompted → in-flow-class banner" 0 \
-  "Ux Designer.*In-flow-class.*adopt the persona IN-THREAD" "$in"
+run_case "hybrid class-aware: UX Designer prompted → in-thread-lens banner" 0 \
+  "Ux Designer.*adopt its lens in-thread" "$in"
 
-# 4g. Prompted Pen Tester (isolated-work-class) — banner instructs SPAWN
+# 4g. Prompted Pen Tester (isolated-work-class) — banner offers SPAWN
 #     with subagent_type: penetration-tester.
 in=$(jq -nc \
   --arg prm "as the pen tester, dry-run an exploit on the new endpoint" \
   '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
-run_case "hybrid class-aware: Pen Tester prompted → isolated-work-class banner" 0 \
-  "Pen Tester.*Isolated-work-class.*subagent_type: penetration-tester" "$in"
+run_case "hybrid class-aware: Pen Tester prompted → spawn-offer banner" 0 \
+  "Pen Tester.*subagent_type: penetration-tester" "$in"
+
+# 4h. Convergence guard (#995): EVERY banner tells the agent not to switch
+#     persona / open ceremony mid-task. Assert it on both an isolated-work
+#     and an in-flow banner.
+in=$(jq -nc \
+  --arg p "src/auth/login.ts" \
+  '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "convergence guard present (isolated-work banner) [#995]" 0 \
+  "do NOT switch persona.*finish the current unit first" "$in"
+in=$(jq -nc \
+  --arg p ".github/workflows/ci.yml" \
+  '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "convergence guard present (in-flow banner) [#995]" 0 \
+  "do NOT switch persona.*finish the current unit first" "$in"
 
 # --- (5) Solution Architect (Tariq) — design-artifact triggers --------------
 
@@ -305,15 +354,15 @@ run_case "path trigger: migration AgDR also fires Solution Architect" 0 \
 in=$(jq -nc \
   --arg p "projects/foo/docs/technical-design-x.md" \
   '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
-run_case "hybrid class-aware: Solution Architect → isolated-work-class banner" 0 \
-  "Solution Architect.*Isolated-work-class.*subagent_type: solution-architect" "$in"
+run_case "hybrid class-aware: Solution Architect → spawn-offer banner" 0 \
+  "Solution Architect.*subagent_type: solution-architect" "$in"
 
 # 5f. Prompted "as the Solution Architect" → Solution Architect banner.
 in=$(jq -nc \
   --arg prm "as the solution architect, review the proposed design" \
   '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
 run_case "prompt trigger: 'as the solution architect' fires Solution Architect" 0 \
-  "Solution Architect.*Isolated-work-class.*subagent_type: solution-architect" "$in"
+  "Solution Architect.*subagent_type: solution-architect" "$in"
 
 # 5g. An ordinary source file does NOT fire the Solution Architect.
 in=$(jq -nc \
@@ -327,6 +376,105 @@ else
   echo "PASS [path trigger: source file does not fire Solution Architect]"
   PASS=$((PASS+1))
 fi
+
+# --- The Contrarian (utility agent, prompted phrase family — AgDR-0078) -------
+
+# 6a. "play devil's advocate" fires The Contrarian.
+in=$(jq -nc \
+  --arg prm "play devil's advocate on adding a second database" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "prompt trigger: 'play devil's advocate' fires The Contrarian" 0 \
+  "The Contrarian \(Naqid\).*subagent_type: contrarian" "$in"
+
+# 6b. "poke holes in" fires The Contrarian.
+in=$(jq -nc \
+  --arg prm "poke holes in this plan before we commit" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "prompt trigger: 'poke holes in' fires The Contrarian" 0 \
+  "The Contrarian \(Naqid\)" "$in"
+
+# 6c. "challenge this" fires The Contrarian.
+in=$(jq -nc \
+  --arg prm "challenge this idea" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "prompt trigger: 'challenge this' fires The Contrarian" 0 \
+  "The Contrarian \(Naqid\)" "$in"
+
+# 6d. An ordinary build prompt does NOT fire The Contrarian.
+in=$(jq -nc \
+  --arg prm "implement the nav filter feature" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+got=$(printf '%s' "$in" | bash "$HOOK" 2>&1 >/dev/null)
+if echo "$got" | grep -q "The Contrarian"; then
+  echo "FAIL [prompt trigger: build prompt must not fire The Contrarian]" >&2
+  FAIL=$((FAIL+1)); FAILED="${FAILED}contrarian-noise "
+else
+  echo "PASS [prompt trigger: build prompt does not fire The Contrarian]"
+  PASS=$((PASS+1))
+fi
+
+# --- (7) Session-scoped once-per-role de-dupe (#995) -------------------------
+# The bug: path/label triggers re-fired on every edit, so a multi-layer unit
+# of work re-triggered a role handover per file → the infinite-loop symptom.
+# The fix fires each role's banner at most once per CLAUDE_CODE_SESSION_ID.
+# These run in a throwaway git repo so REPO_ROOT (and the role-fired marker
+# dir) resolve there, never polluting the real session dir.
+
+DEDUP_REPO=$(mktemp -d)
+( cd "$DEDUP_REPO" && git init -q )
+
+SID_A="test-session-aaa-995"
+SID_B="test-session-bbb-995"
+
+# dedup_edit <sid> <path> — fire an Edit-trigger with a given session id under
+# DEDUP_REPO; echoes stderr (the banner, if any). Empty sid → fail-open path.
+dedup_edit() {
+  local sid="$1" path="$2" input
+  input=$(jq -nc --arg p "$path" \
+    '{hook_event_name:"PreToolUse", tool_name:"Edit", tool_input:{file_path:$p}}')
+  # Capture stderr (the banner), discard stdout. The brace-group form keeps the
+  # redirection order unambiguous (shellcheck SC2069).
+  { printf '%s' "$input" | ( cd "$DEDUP_REPO" && CLAUDE_CODE_SESSION_ID="$sid" bash "$HOOK" ) >/dev/null; } 2>&1
+}
+
+assert_dedup() {
+  local label="$1" expect="$2" out="$3"
+  if [ "$expect" = "fire" ]; then
+    if [ -n "$out" ]; then echo "PASS [$label]"; PASS=$((PASS+1));
+    else echo "FAIL [$label]: expected a banner, got silence" >&2; FAIL=$((FAIL+1)); FAILED="${FAILED}${label} "; fi
+  else
+    if [ -z "$out" ]; then echo "PASS [$label]"; PASS=$((PASS+1));
+    else echo "FAIL [$label]: expected silence, got: ${out:0:120}" >&2; FAIL=$((FAIL+1)); FAILED="${FAILED}${label} "; fi
+  fi
+}
+
+# 7a. First Security-Auditor edit in session A → fires.
+assert_dedup "dedup 7a: first auth edit (session A) fires" fire \
+  "$(dedup_edit "$SID_A" "src/auth/login.ts")"
+
+# 7b. A DIFFERENT file that maps to the SAME role (Security Auditor) in the
+#     same session → silent. This is the exact loop scenario: many files, one
+#     role, one banner.
+assert_dedup "dedup 7b: second same-role edit (session A) is silent" silent \
+  "$(dedup_edit "$SID_A" "packages/api/src/auth/jwt.ts")"
+
+# 7c. A DIFFERENT role in the same session still fires — de-dupe is per-role,
+#     not a global once-per-session mute.
+assert_dedup "dedup 7c: different role (session A) still fires" fire \
+  "$(dedup_edit "$SID_A" ".github/workflows/ci.yml")"
+
+# 7d. The original role in a NEW session fires again — de-dupe is session-scoped.
+assert_dedup "dedup 7d: same role in a new session fires again" fire \
+  "$(dedup_edit "$SID_B" "src/auth/login.ts")"
+
+# 7e. Fail-open: with no session id, repeated same-role edits BOTH fire
+#     (degrades to pre-#995 always-fire, since a banner is advisory).
+assert_dedup "dedup 7e-i: no session id — first edit fires" fire \
+  "$(dedup_edit "" "src/auth/login.ts")"
+assert_dedup "dedup 7e-ii: no session id — second edit ALSO fires (fail-open)" fire \
+  "$(dedup_edit "" "src/auth/login.ts")"
+
+rm -rf "$DEDUP_REPO"
 
 # --- Summary -----------------------------------------------------------------
 

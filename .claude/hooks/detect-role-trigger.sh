@@ -103,6 +103,59 @@ agent_slug_for() {
 }
 
 # ---------------------------------------------------------------------------
+# Session-scoped, once-per-role de-dupe (me2resh/apexyard#995).
+#
+# The path/label triggers fire on EVERY matching Edit/Write/Bash. Before
+# this guard a single multi-layer unit of work (backend code → an AgDR →
+# a CI file) re-emitted a role-activation banner on each edit, and the
+# agent, reading each banner as an instruction, kept switching persona /
+# opening ceremony mid-task instead of finishing the unit — the "infinite
+# role-handover loop, zero progress" a real user reported (#995).
+#
+# This makes each role's banner fire AT MOST ONCE per Claude Code session.
+# The marker is keyed on CLAUDE_CODE_SESSION_ID, so a new session starts
+# fresh with NO new SessionStart hook and NO settings.json change (keeps
+# this a Standard-tier advisory hook, not a trust-chain edit). It is
+# self-cleaning: each call sweeps markers left by other sessions, so the
+# dir can't grow without bound.
+#
+# Fail-open by design: no session id, no REPO_ROOT, or an unwritable
+# session dir all degrade to the pre-#995 always-fire behaviour. A banner
+# is advisory — over-surfacing on a broken environment is strictly safer
+# than silently swallowing role activation.
+#
+# Returns 0 = already fired this session (SKIP the banner);
+#         1 = first time / fail-open (FIRE the banner).
+# ---------------------------------------------------------------------------
+role_banner_already_fired() {
+  local file="$1"
+  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  [ -z "$sid" ] && return 1          # no session id → always fire (fail-open)
+  [ -z "$REPO_ROOT" ] && return 1    # no repo root → always fire (fail-open)
+
+  local dir="$REPO_ROOT/.claude/session/role-fired"
+  mkdir -p "$dir" 2>/dev/null || return 1   # can't record → always fire
+
+  # Self-clean: drop markers from any prior/other session so the dir
+  # doesn't accumulate across sessions (no SessionStart sweep needed).
+  local f
+  for f in "$dir"/*; do
+    [ -e "$f" ] || continue
+    case "${f##*/}" in
+      "${sid}__"*) : ;;              # keep this session's markers
+      *) rm -f "$f" 2>/dev/null ;;   # sweep other sessions'
+    esac
+  done
+
+  local slug marker
+  slug=$(printf '%s' "$file" | tr '/ ' '__')
+  marker="$dir/${sid}__${slug}"
+  [ -e "$marker" ] && return 0        # already fired this session → skip
+  : > "$marker" 2>/dev/null || return 1  # can't write → fail-open, fire
+  return 1                            # first time → fire
+}
+
+# ---------------------------------------------------------------------------
 # Helper: emit one class-aware banner line. Multiple triggers in a single
 # call can fire multiple banners.
 #
@@ -127,15 +180,29 @@ agent_slug_for() {
 # ---------------------------------------------------------------------------
 emit_banner() {
   local role="$1" file="$2" reason="$3"
+
+  # Session-scoped de-dupe (#995): a role's banner surfaces at most once
+  # per session, so a multi-edit unit of work doesn't re-trigger a
+  # handover on every file. Advisory — the underlying tool call always
+  # proceeds regardless.
+  if role_banner_already_fired "$file"; then
+    return 0
+  fi
+
   local class agent_slug
   class=$(lookup_role_class "$file")
   agent_slug=$(agent_slug_for "$file")
 
+  # Both banners are ADVISORY and carry a convergence guard (#995): they
+  # name the role that OWNS this kind of work, but explicitly tell the
+  # agent NOT to switch persona / open new ceremony mid-task. Roles hand
+  # off at phase boundaries, not on every edit — the counter-force that
+  # keeps "make progress by default" the default.
   if [ "$class" = "isolated-work-class" ]; then
-    printf 'ROLE TRIGGER: %s activates per .claude/rules/role-triggers.md (%s). Isolated-work-class — SPAWN the sub-agent via the Agent tool with subagent_type: %s. Canonical role at %s, agent wrapper at .claude/agents/%s.md. Per AgDR-0050 § Axis 6.\n' \
+    printf 'ROLE TRIGGER: %s owns this kind of work per .claude/rules/role-triggers.md (%s) [advisory, once/session]. If you are STARTING a discrete, isolatable task, you MAY spawn it via the Agent tool with subagent_type: %s (canonical role at %s, wrapper at .claude/agents/%s.md). But if you are MID-TASK and making progress, do NOT switch persona or open new ceremony on this edit — finish the current unit first; roles hand off at phase boundaries, not per file. Per AgDR-0050 § Axis 6 + #995.\n' \
       "$role" "$reason" "$agent_slug" "$file" "$agent_slug" >&2
   else
-    printf 'ROLE TRIGGER: %s activates per .claude/rules/role-triggers.md (%s). In-flow-class — adopt the persona IN-THREAD. Read %s before continuing. Per AgDR-0050 § Axis 6.\n' \
+    printf 'ROLE TRIGGER: %s owns this kind of work per .claude/rules/role-triggers.md (%s) [advisory, once/session]. If helpful, read %s to adopt its lens in-thread. But if you are MID-TASK and making progress, do NOT switch persona or open new ceremony on this edit — finish the current unit first; roles hand off at phase boundaries, not per file. Per AgDR-0050 § Axis 6 + #995.\n' \
       "$role" "$reason" "$file" >&2
   fi
 }
@@ -181,6 +248,25 @@ detect_path_triggers() {
         "Security Auditor" \
         "roles/security/security-auditor.md" \
         "edit touches security-sensitive path ($rel)"
+      ;;
+  esac
+
+  # Security Auditor — the TRUST CHAIN (me2resh/apexyard#777).
+  # The framework's most security-critical code is its own enforcement layer:
+  # the hooks that decide whether an action (esp. a merge) is permitted, and the
+  # settings.json matcher wiring that decides whether a gate fires at all. These
+  # are NOT auth/crypto/secrets paths, so the trigger above misses them — yet a
+  # subtle bug here (a path-traversal write, a fail-open gate, an injection in
+  # the tracker/broker lib) is exactly what the adversarial security lens is for.
+  # Over-triggering is cheap (the auditor no-ops on a false positive); leaving
+  # trust-chain edits to the generalist review alone is the gap #777 closes.
+  case "$rel" in
+    .claude/hooks/*|*/.claude/hooks/*|\
+    .claude/settings.json|*/.claude/settings.json)
+      emit_banner \
+        "Security Auditor" \
+        "roles/security/security-auditor.md" \
+        "edit touches the security-critical trust chain ($rel) — run /security-review"
       ;;
   esac
 
@@ -365,12 +451,43 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Contrarian prompted-activation detection (UserPromptSubmit).
+#
+# The Contrarian (Naqid) is a UTILITY agent (no roles/ file), invoked on the
+# "play devil's advocate" family of phrases rather than the "act as the X"
+# shape the role table uses — so it gets its own matcher + its own banner
+# (emit_banner reads a roles/ Class line that doesn't exist for utility
+# agents). Advisory + on-demand: this fires a suggestion to run /challenge or
+# spawn the contrarian agent; it never blocks. See AgDR-0078.
+#
+# Over-triggering is acceptable (the agent no-ops cheaply on a false positive),
+# consistent with the rest of this hook's philosophy.
+# ---------------------------------------------------------------------------
+detect_contrarian_triggers() {
+  local prompt="$1"
+  [ -z "$prompt" ] && return 0
+
+  local norm
+  norm=$(printf '%s' "$prompt" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ',.;:!?()[]{}"'"'" ' ' \
+    | tr -s '[:space:]' ' ')
+
+  # Phrase family (normalised — apostrophes are already spaces, so
+  # "devil's advocate" → "devil s advocate", matched by `devil[ s]*advocate`).
+  if printf ' %s ' "$norm" | grep -qE 'devil[ s]*advocate|poke holes|steelman|the case against|challenge this|the contrarian|naqid'; then
+    printf 'ROLE TRIGGER: The Contrarian (Naqid) — prompted premise-level challenge per .claude/rules/role-triggers.md. Run /challenge <target>, OR spawn the agent via the Agent tool with subagent_type: contrarian, to steelman-then-challenge (advisory only — never blocks a gate). See .claude/agents/contrarian.md + .claude/skills/challenge/SKILL.md. Per AgDR-0078.\n' >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch on hook event.
 # ---------------------------------------------------------------------------
 case "$HOOK_EVENT" in
   UserPromptSubmit)
     prompt=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
     detect_prompt_triggers "$prompt"
+    detect_contrarian_triggers "$prompt"
     ;;
   PreToolUse|PostToolUse|"")
     # Hook event name was missing on some older harness versions — fall
