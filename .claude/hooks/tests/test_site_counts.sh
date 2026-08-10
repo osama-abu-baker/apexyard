@@ -225,7 +225,11 @@ fi
 echo
 echo "Advertised site version vs CHANGELOG (drift guard):"
 # CHANGELOG: the top-most `## [X.Y.Z]` heading is the canonical current version.
-CHANGELOG_VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md 2>/dev/null \
+# Optional `v` prefix: entries through 3.2.0 were written bare, 3.3.0+ add a
+# `v` (e.g. `## [v5.4.0]`) -- match both so the top-most entry is found
+# regardless of which era it's from, instead of silently matching an old
+# bare-format entry further down the file.
+CHANGELOG_VERSION=$(grep -m1 -oE '^## \[v?[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md 2>/dev/null \
   | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 # site/index.html: JSON-LD `softwareVersion` (bare X.Y.Z, no `v` prefix).
 SITE_VERSION=$(grep -oE '"softwareVersion"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' site/index.html 2>/dev/null \

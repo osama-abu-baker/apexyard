@@ -47,7 +47,7 @@ if echo "$COMMAND" | grep -qE '(^|[;&|]|\s)cd\s+["'"'"']?(/tmp|/private/tmp|/var
 fi
 
 # Match destructive git: hard reset, forced clean, forced checkout.
-if echo "$COMMAND" | grep -qE '\bgit\s+reset\s+(--hard|-\-hard)\b|\bgit\s+clean\s+(-[a-zA-Z]*f[a-zA-Z]*d?|--force)\b|\bgit\s+checkout\s+(--force|-f)\b'; then
+if echo "$COMMAND" | grep -qE '\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+(-[a-zA-Z]*f[a-zA-Z]*d?|--force)\b|\bgit\s+checkout\s+(--force|-f)\b'; then
   WARN_HARD_RESET=1
 fi
 
