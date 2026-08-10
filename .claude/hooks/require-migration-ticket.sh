@@ -370,13 +370,13 @@ if command -v tracker_kind >/dev/null 2>&1; then
   [ -n "$TICKET_KIND" ] || TICKET_KIND="gh"
 fi
 if [ "$TICKET_KIND" = "none" ]; then
-  # Local strengthening: for a Jira-shaped key (e.g. ITH-88) under
+  # Local strengthening: for a Jira-shaped key (e.g. PROJ-88) under
   # tracker.kind=none, don't just trust the operator blindly (#755's
   # default) -- this fork has no `jira` CLI for hooks to shell out to, but
   # it DOES have real migration AgDRs, so verify one exists locally that
-  # references the ticket. See ITH-94 + the standing rule that apexyard
-  # hooks must not check GitHub for Jira-tracked references. Non-Jira-shaped
-  # keys under tracker.kind=none fall through to upstream's #755 skip.
+  # references the ticket, per the standing rule that apexyard hooks must
+  # not check GitHub for Jira-tracked references. Non-Jira-shaped keys
+  # under tracker.kind=none fall through to upstream's #755 skip.
   if echo "$TICKET_NUM" | grep -qE '^[A-Z][A-Z0-9]+-[0-9]+$'; then
     AGDR_SEARCH_DIRS="$MARKER_HOME/docs/agdr"
     if [ -f "$PCONFIG" ] && command -v jq >/dev/null 2>&1; then
