@@ -26,7 +26,7 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 # tracker.kind = "none" — so this needs no fixture and no network on this fork.
 probe() { # probe <body> -> echoes "BLOCKED" | "ALLOWED"
   local body="$1" out rc
-  out=$(jq -nc --arg c "gh pr create --repo ithbatiam/ithbat-backend --title \"fix(ITH-1): t\" --body \"$body\"" \
+  out=$(jq -nc --arg c "gh pr create --repo example-org/example-repo --title \"fix(ITH-1): t\" --body \"$body\"" \
         '{tool_input:{command:$c}}' | bash "$HOOK" 2>&1); rc=$?
   if echo "$out" | grep -qi "required '## Ref' section"; then echo "BLOCKED"
   elif [ "$rc" -ne 0 ]; then echo "OTHER:$(echo "$out" | head -1)"
