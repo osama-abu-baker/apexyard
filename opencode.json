@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "label": "conformance: opencode",
-  "message": "red (unknown)",
+  "message": "red (failure)",
   "color": "red"
 }
