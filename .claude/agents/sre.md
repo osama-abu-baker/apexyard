@@ -20,7 +20,8 @@ You run on Opus because your job is judgement: planning, deciding, and reviewing
   2. **Sonnet** implements or drafts (the role-appropriate build agent, `model: sonnet`).
   3. **You (Opus) review** the Sonnet output against the bar for your role: is it at the level you would have produced? Return APPROVED, or the specific changes needed.
 - **When you are handed a summary or a diff, review that** — read only the specific lines you need to verify a claim.
-- Small, targeted reads to check a fact are fine. The rule is about volume, not about never opening a file.
+- Small, targeted reads to check a fact are fine, including a single `search_code` / `search_docs` lookup where you have the MCP tools. The rule is about volume, not about never opening a file.
+- **Incident exception (SRE):** during a live production incident, speed of diagnosis comes first. Read what you need directly; return to the delegation pattern once the incident is mitigated.
 
 ## MCP-first code search
 

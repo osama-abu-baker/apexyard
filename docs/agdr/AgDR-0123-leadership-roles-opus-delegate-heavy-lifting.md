@@ -1,12 +1,14 @@
 # AgDR-0123 — Leadership and review roles on Opus, heavy lifting delegated to Haiku and Sonnet
 
+**Status**: Accepted · **Category**: agents / cost · **Amends**: AgDR-0050 (model matrix, four Heads) · **Related**: AgDR-0074, AgDR-0056
+
 > In the context of the per-agent model matrix (AgDR-0050) and the observed cost of Opus doing bulk reading and writing (AgDR-0074), facing a CEO directive that execution must run on cheaper tiers while judgement stays on Opus, I decided to **put every leadership and review role on Opus but forbid it from doing heavy reading or writing itself — the orchestrator runs Haiku to read, Sonnet to build, and the Opus role reviews the Sonnet output against its own bar** — to achieve Opus-quality decisions at Sonnet/Haiku execution cost, accepting that the pipeline must be driven by the orchestrator because a sub-agent cannot spawn sub-agents.
 
 ## Context
 
 - AgDR-0050's matrix put Tech Lead, SRE, Head of Engineering and the reviewers on Opus, but the other Heads (Product, Design, Security, Data) on Sonnet.
 - AgDR-0074 found the main thread dominates spend because Opus does the bulk work in-thread.
-- CEO directive (2026-11-22, ITH-611): subagents doing execution run on Sonnet or Haiku; Opus is for planning, reviewing and orchestrating. All Heads, the Tech Lead, SRE and the Arabic UX writer stay on Opus but must not do heavy lifting.
+- CEO directive (2026-11-22, ITH-611): subagents doing execution run on Sonnet or Haiku; Opus is for planning, reviewing and orchestrating. All Heads, the Tech Lead and SRE stay on Opus but must not do heavy lifting.
 - Platform constraint: a sub-agent has no Agent tool, so an Opus role spawned as a sub-agent cannot itself dispatch Haiku/Sonnet workers.
 
 ## Options Considered
